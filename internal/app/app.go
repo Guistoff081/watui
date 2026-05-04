@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,7 +29,6 @@ const (
 	StateError
 )
 
-// Focus panel identifiers
 type Panel int
 
 const (
@@ -43,20 +43,25 @@ type WAClient interface {
 	SendTextMessage(jid types.JID, text string) tea.Cmd
 	SendFileMessage(jid types.JID, path string) tea.Cmd
 	SendAudioMessage(jid types.JID, path string) tea.Cmd
+	SendChatPresence(jid types.JID, composing bool)
 	MarkRead(chatJID types.JID, sender types.JID, messageIDs []string)
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
 }
 
-// conversationsLoadedMsg is sent after loading conversations from the app store.
-type conversationsLoadedMsg struct {
-	Conversations []theme.Conversation
-}
+// --- private message types ---
 
-// contactNamesMsg is sent after loading contact names from whatsmeow.
-type contactNamesMsg struct {
-	Names map[string]string // JID -> name
+type conversationsLoadedMsg struct{ Conversations []theme.Conversation }
+type contactNamesMsg struct{ Names map[string]string }
+type olderMessagesLoadedMsg struct {
+	ChatJID  string
+	Messages []theme.Message
 }
+type reconnectMsg struct{}
+type typingStopMsg struct{ gen int }
+type clearStatusMsg struct{}
+
+// ---
 
 type Model struct {
 	state State
@@ -64,7 +69,6 @@ type Model struct {
 	store *store.Store
 	focus Panel
 
-	// Sub-models
 	auth      auth.Model
 	chatList  chatlist.Model
 	chatView  chatview.Model
@@ -72,18 +76,21 @@ type Model struct {
 	titleBar  titlebar.Model
 	statusBar statusbar.Model
 
-	// Window dimensions
 	width  int
 	height int
 
-	// State
 	connectedJID string
 	lastErr      error
 
-	// Conversation data: maps JID -> messages (in-memory cache)
-	chatMessages map[string][]theme.Message
-	// Conversation data: maps JID -> Conversation (in-memory cache)
+	chatMessages  map[string][]theme.Message
 	conversations map[string]theme.Conversation
+
+	// Typing indicator state
+	isTyping  bool
+	typingGen int
+
+	// Reconnect backoff
+	reconnectAttempts int
 }
 
 func NewModel(wa WAClient, s *store.Store, version string) Model {
@@ -104,10 +111,7 @@ func NewModel(wa WAClient, s *store.Store, version string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.auth.Init(),
-		m.wa.Connect(),
-	)
+	return tea.Batch(m.auth.Init(), m.wa.Connect())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -128,7 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
-	// --- Auth messages ---
+	// --- Auth ---
 	case theme.QRCodeMsg:
 		m.state = StateAuth
 		m.auth.SetQRCode(msg.Code)
@@ -145,11 +149,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connectedJID = msg.JID.String()
 		m.state = StateChat
 		m.lastErr = nil
+		m.reconnectAttempts = 0
 		m.statusBar.SetConnected(m.connectedJID)
 		m.statusBar.SetMessage("Loading conversations...")
 		m.applyFocus()
 		m.layout()
-		// Load conversations from the app-level store + enrich names from whatsmeow
 		cmds = append(cmds, m.loadConversationsCmd(), m.loadContactNamesCmd())
 
 	case theme.LoginFailedMsg:
@@ -158,10 +162,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case theme.DisconnectedMsg:
 		m.statusBar.SetDisconnected()
-		if m.state == StateChat {
-			// Stay in chat state but show disconnected status
-			m.statusBar.SetMessage("Reconnecting...")
-		} else {
+		if m.state == StateChat && msg.Err == nil && m.reconnectAttempts < 5 {
+			// Unexpected disconnect — schedule a reconnect attempt with linear backoff.
+			m.reconnectAttempts++
+			delay := time.Duration(m.reconnectAttempts) * 3 * time.Second
+			m.statusBar.SetMessage(fmt.Sprintf("Reconnecting... (attempt %d)", m.reconnectAttempts))
+			cmds = append(cmds, reconnectAfterDelay(delay))
+		} else if m.state != StateChat {
 			m.state = StateError
 			if msg.Err != nil {
 				m.lastErr = msg.Err
@@ -170,7 +177,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	// --- Conversations loaded from store ---
+	case reconnectMsg:
+		cmds = append(cmds, m.wa.Connect())
+
+	// --- Conversations ---
 	case conversationsLoadedMsg:
 		for _, conv := range msg.Conversations {
 			m.conversations[conv.JID] = conv
@@ -178,7 +188,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusBar.ClearMessage()
 
-	// --- Contact names enrichment from whatsmeow ---
 	case contactNamesMsg:
 		for jid, name := range msg.Names {
 			if conv, ok := m.conversations[jid]; ok {
@@ -191,19 +200,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	// --- History sync (first pairing) ---
 	case theme.ConversationUpdatedMsg:
 		m.conversations[msg.Conversation.JID] = msg.Conversation
 		m.chatList.UpsertConversation(msg.Conversation)
-		// Persist to app store
 		_ = m.store.UpsertConversation(context.Background(), msg.Conversation)
 
 	case theme.MessagesLoadedMsg:
 		jid := msg.ChatJID.String()
 		m.chatMessages[jid] = msg.Messages
-		// Persist to app store
 		_ = m.store.InsertMessages(context.Background(), msg.Messages)
-		// If this is the currently viewed chat, refresh the view
 		if m.chatView.ChatJID() == jid {
 			conv := m.conversations[jid]
 			m.chatView.SetChat(jid, conv.IsGroup, msg.Messages)
@@ -212,22 +217,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case theme.HistorySyncCompleteMsg:
 		m.statusBar.ClearMessage()
 
+	// --- Lazy-load older messages ---
+	case chatview.LoadOlderMsg:
+		cmds = append(cmds, m.loadOlderMessagesCmd(msg.ChatJID))
+
+	case olderMessagesLoadedMsg:
+		if len(msg.Messages) == 0 {
+			m.chatView.SetNoMoreMessages()
+		} else {
+			m.chatMessages[msg.ChatJID] = append(msg.Messages, m.chatMessages[msg.ChatJID]...)
+			if m.chatView.ChatJID() == msg.ChatJID {
+				m.chatView.PrependMessages(msg.Messages)
+			}
+		}
+
 	// --- Chat selection ---
 	case chatlist.ChatSelectedCmd:
 		return m.selectChat(msg.JID)
 
-	// --- New incoming message ---
+	// --- Messages ---
 	case theme.NewMessageMsg:
 		return m.handleNewMessage(msg.Message)
 
-	// --- Message sent ---
 	case theme.MessageSentMsg:
 		m.chatView.UpdateMessageStatus(msg.MessageID, "sent")
 
 	case theme.MessageSendFailedMsg:
 		m.chatView.UpdateMessageStatus(msg.MessageID, "failed")
+		errText := "Send failed"
+		if msg.Err != nil {
+			errText = "Send failed: " + msg.Err.Error()
+		}
+		m.statusBar.SetMessage(errText)
+		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
 
-	// --- Message status (delivery/read receipts) ---
 	case theme.MessageStatusMsg:
 		if m.chatView.ChatJID() == msg.ChatJID.String() {
 			m.chatView.UpdateMessageStatus(msg.MessageID, msg.Status)
@@ -237,20 +260,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case theme.TypingMsg:
 		if m.chatView.ChatJID() == msg.ChatJID.String() {
 			if msg.IsTyping {
-				name := msg.Sender.User
-				m.titleBar.SetTyping(name)
+				m.titleBar.SetTyping(msg.Sender.User)
 			} else {
 				m.titleBar.SetTyping("")
 			}
 		}
 
-	// --- Send message from input ---
+	case typingStopMsg:
+		// Only act if this timer is the most recent one (generation matches).
+		if msg.gen == m.typingGen && m.isTyping {
+			m.isTyping = false
+			cmds = append(cmds, m.sendTypingPresenceCmd(false))
+		}
+
+	// --- Status bar ---
+	case clearStatusMsg:
+		m.statusBar.ClearMessage()
+
+	// --- Input ---
 	case input.SendMsg:
 		return m.handleSendMessage(msg.Text)
-
 	case input.SendFileMsg:
 		return m.handleSendFile(msg.Path)
-
 	case input.SendAudioMsg:
 		return m.handleSendAudio(msg.Path)
 
@@ -259,7 +290,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = msg
 	}
 
-	// Forward to sub-models based on state
 	if m.state == StateAuth {
 		var cmd tea.Cmd
 		m.auth, cmd = m.auth.Update(msg)
@@ -269,45 +299,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// loadConversationsCmd loads all conversations from the app-level SQLite store.
-func (m Model) loadConversationsCmd() tea.Cmd {
-	return func() tea.Msg {
-		convs, err := m.store.GetAllConversations(context.Background())
-		if err != nil {
-			return nil
-		}
-		return conversationsLoadedMsg{Conversations: convs}
-	}
-}
-
-// loadContactNamesCmd loads contact and group names from whatsmeow's store
-// and merges them into conversations that are missing names.
-func (m Model) loadContactNamesCmd() tea.Cmd {
-	return func() tea.Msg {
-		names := m.wa.GetAllContactNames()
-		if names == nil {
-			names = make(map[string]string)
-		}
-		// Group names override contact names
-		groupNames := m.wa.GetGroupNames()
-		for jid, name := range groupNames {
-			names[jid] = name
-		}
-		return contactNamesMsg{Names: names}
-	}
-}
+// --- Key handling ---
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global keys
 	if key == "ctrl+c" {
 		m.wa.Disconnect()
 		return m, tea.Quit
 	}
 
 	if m.state != StateChat {
-		// In auth/error state, only handle window-level keys
 		if m.state == StateAuth {
 			var cmd tea.Cmd
 			m.auth, cmd = m.auth.Update(msg)
@@ -316,44 +318,47 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// If input is focused, let it handle most keys except Tab/Escape
 	if m.focus == PanelInput {
 		switch key {
 		case "tab":
-			m.cycleFocus(1)
-			return m, nil
+			return m, m.cycleFocus(1)
 		case "shift+tab":
-			m.cycleFocus(-1)
-			return m, nil
+			return m, m.cycleFocus(-1)
 		case "esc":
-			m.setFocus(PanelChatList)
-			return m, nil
+			return m, m.setFocus(PanelChatList)
 		default:
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
+			var cmds []tea.Cmd
+			var inputCmd tea.Cmd
+			m.input, inputCmd = m.input.Update(msg)
+			cmds = append(cmds, inputCmd)
+
+			// Send composing presence for printable keystrokes in text mode.
+			if m.input.IsComposing() && isTypingKey(key) && m.chatView.ChatJID() != "" {
+				if !m.isTyping {
+					m.isTyping = true
+					cmds = append(cmds, m.sendTypingPresenceCmd(true))
+				}
+				m.typingGen++
+				cmds = append(cmds, typingStopAfterIdle(m.typingGen))
+			}
+			return m, tea.Batch(cmds...)
 		}
 	}
 
-	// Chat state key handling for non-input panels
 	switch key {
 	case "tab":
-		m.cycleFocus(1)
-		return m, nil
+		return m, m.cycleFocus(1)
 	case "shift+tab":
-		m.cycleFocus(-1)
-		return m, nil
+		return m, m.cycleFocus(-1)
 	case "esc":
 		if m.focus == PanelMessages {
-			m.setFocus(PanelChatList)
+			return m, m.setFocus(PanelChatList)
 		}
 		return m, nil
 	case "i":
-		m.setFocus(PanelInput)
-		return m, nil
+		return m, m.setFocus(PanelInput)
 	}
 
-	// Forward to focused panel
 	var cmd tea.Cmd
 	switch m.focus {
 	case PanelChatList:
@@ -361,9 +366,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case PanelMessages:
 		m.chatView, cmd = m.chatView.Update(msg)
 	}
-
 	return m, cmd
 }
+
+// --- Focus management ---
+
+// setFocus changes focus and, if leaving the input panel while composing,
+// sends the "paused" typing presence.
+func (m *Model) setFocus(p Panel) tea.Cmd {
+	var cmd tea.Cmd
+	if m.focus == PanelInput && p != PanelInput && m.isTyping {
+		m.isTyping = false
+		m.typingGen++
+		cmd = m.sendTypingPresenceCmd(false)
+	}
+	m.focus = p
+	m.applyFocus()
+	return cmd
+}
+
+func (m *Model) cycleFocus(dir int) tea.Cmd {
+	panels := []Panel{PanelChatList, PanelMessages, PanelInput}
+	current := 0
+	for i, p := range panels {
+		if p == m.focus {
+			current = i
+			break
+		}
+	}
+	next := (current + dir + len(panels)) % len(panels)
+	return m.setFocus(panels[next])
+}
+
+func (m *Model) applyFocus() {
+	m.chatList.SetFocused(m.focus == PanelChatList)
+	m.chatView.SetFocused(m.focus == PanelMessages)
+	m.input.SetFocused(m.focus == PanelInput)
+}
+
+// --- Chat selection ---
 
 func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	conv, ok := m.conversations[jid]
@@ -371,10 +412,8 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	// Set title bar
 	m.titleBar.SetChat(conv.Name, conv.JID, conv.IsGroup)
 
-	// Load messages: try in-memory cache first, then from store
 	messages := m.chatMessages[jid]
 	if len(messages) == 0 {
 		if stored, err := m.store.GetMessages(context.Background(), jid, 200); err == nil && len(stored) > 0 {
@@ -384,24 +423,55 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	}
 	m.chatView.SetChat(jid, conv.IsGroup, messages)
 
-	// Clear unread count
 	m.chatList.ClearUnread(jid)
 	_ = m.store.ClearUnread(context.Background(), jid)
 
-	// Focus the message view
-	m.setFocus(PanelMessages)
+	// Send read receipts to WhatsApp for received messages.
+	m.markChatRead(jid, conv.IsGroup, messages)
 
-	return *m, nil
+	focusCmd := m.setFocus(PanelMessages)
+	return *m, focusCmd
 }
+
+func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message) {
+	parsedJID, err := types.ParseJID(jid)
+	if err != nil || len(messages) == 0 {
+		return
+	}
+
+	if isGroup {
+		// Group chats require per-sender receipts.
+		bySender := make(map[string][]string)
+		for _, msg := range messages {
+			if !msg.IsFromMe && msg.SenderJID != "" {
+				bySender[msg.SenderJID] = append(bySender[msg.SenderJID], msg.ID)
+			}
+		}
+		for senderStr, ids := range bySender {
+			if senderJID, err := types.ParseJID(senderStr); err == nil {
+				m.wa.MarkRead(parsedJID, senderJID, ids)
+			}
+		}
+	} else {
+		var ids []string
+		for _, msg := range messages {
+			if !msg.IsFromMe {
+				ids = append(ids, msg.ID)
+			}
+		}
+		if len(ids) > 0 {
+			m.wa.MarkRead(parsedJID, parsedJID, ids)
+		}
+	}
+}
+
+// --- Message handlers ---
 
 func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 	jid := msg.ChatJID
-
-	// Store message in memory and persist
 	m.chatMessages[jid] = append(m.chatMessages[jid], msg)
 	_ = m.store.InsertMessage(context.Background(), msg)
 
-	// Update conversation
 	if conv, ok := m.conversations[jid]; ok {
 		conv.LastMessage = msg.Content
 		conv.LastMsgTime = msg.Timestamp
@@ -413,11 +483,9 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 		_ = m.store.UpsertConversation(context.Background(), conv)
 	}
 
-	// If this is the currently viewed chat, append to the view
 	if m.chatView.ChatJID() == jid {
 		m.chatView.AppendMessage(msg)
 	}
-
 	return *m, nil
 }
 
@@ -426,13 +494,11 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 	if chatJID == "" {
 		return *m, nil
 	}
-
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
 		return *m, nil
 	}
 
-	// Create optimistic message
 	msg := theme.Message{
 		ID:        fmt.Sprintf("sending-%d", len(m.chatMessages[chatJID])),
 		ChatJID:   chatJID,
@@ -441,11 +507,9 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 		IsFromMe:  true,
 		Status:    "sending",
 	}
-
 	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
 	m.chatView.AppendMessage(msg)
 
-	// Update conversation preview
 	if conv, ok := m.conversations[chatJID]; ok {
 		conv.LastMessage = text
 		conv.LastMsgTime = msg.Timestamp
@@ -454,7 +518,14 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 		_ = m.store.UpsertConversation(context.Background(), conv)
 	}
 
-	return *m, m.wa.SendTextMessage(jid, text)
+	var cmds []tea.Cmd
+	if m.isTyping {
+		m.isTyping = false
+		m.typingGen++
+		cmds = append(cmds, m.sendTypingPresenceCmd(false))
+	}
+	cmds = append(cmds, m.wa.SendTextMessage(jid, text))
+	return *m, tea.Batch(cmds...)
 }
 
 func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
@@ -487,7 +558,14 @@ func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
 		_ = m.store.UpsertConversation(context.Background(), conv)
 	}
 
-	return *m, m.wa.SendFileMessage(jid, path)
+	var cmds []tea.Cmd
+	if m.isTyping {
+		m.isTyping = false
+		m.typingGen++
+		cmds = append(cmds, m.sendTypingPresenceCmd(false))
+	}
+	cmds = append(cmds, m.wa.SendFileMessage(jid, path))
+	return *m, tea.Batch(cmds...)
 }
 
 func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
@@ -520,40 +598,112 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 		_ = m.store.UpsertConversation(context.Background(), conv)
 	}
 
-	return *m, m.wa.SendAudioMessage(jid, path)
-}
-
-func (m *Model) cycleFocus(dir int) {
-	panels := []Panel{PanelChatList, PanelMessages, PanelInput}
-	current := 0
-	for i, p := range panels {
-		if p == m.focus {
-			current = i
-			break
-		}
+	var cmds []tea.Cmd
+	if m.isTyping {
+		m.isTyping = false
+		m.typingGen++
+		cmds = append(cmds, m.sendTypingPresenceCmd(false))
 	}
-	next := (current + dir + len(panels)) % len(panels)
-	m.setFocus(panels[next])
+	cmds = append(cmds, m.wa.SendAudioMessage(jid, path))
+	return *m, tea.Batch(cmds...)
 }
 
-func (m *Model) setFocus(p Panel) {
-	m.focus = p
-	m.applyFocus()
+// --- Commands ---
+
+func (m Model) loadConversationsCmd() tea.Cmd {
+	return func() tea.Msg {
+		convs, err := m.store.GetAllConversations(context.Background())
+		if err != nil {
+			return nil
+		}
+		return conversationsLoadedMsg{Conversations: convs}
+	}
 }
 
-func (m *Model) applyFocus() {
-	m.chatList.SetFocused(m.focus == PanelChatList)
-	m.chatView.SetFocused(m.focus == PanelMessages)
-	m.input.SetFocused(m.focus == PanelInput)
+func (m Model) loadContactNamesCmd() tea.Cmd {
+	return func() tea.Msg {
+		names := m.wa.GetAllContactNames()
+		if names == nil {
+			names = make(map[string]string)
+		}
+		for jid, name := range m.wa.GetGroupNames() {
+			names[jid] = name
+		}
+		return contactNamesMsg{Names: names}
+	}
 }
 
-// layout recalculates dimensions for all sub-components.
+func (m Model) loadOlderMessagesCmd(chatJID string) tea.Cmd {
+	msgs := m.chatMessages[chatJID]
+	if len(msgs) == 0 {
+		return nil
+	}
+	before := msgs[0].Timestamp
+	return func() tea.Msg {
+		older, err := m.store.GetMessagesBefore(context.Background(), chatJID, before, 50)
+		if err != nil {
+			return olderMessagesLoadedMsg{ChatJID: chatJID}
+		}
+		return olderMessagesLoadedMsg{ChatJID: chatJID, Messages: older}
+	}
+}
+
+func (m *Model) sendTypingPresenceCmd(composing bool) tea.Cmd {
+	chatJID := m.chatView.ChatJID()
+	if chatJID == "" {
+		return nil
+	}
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return nil
+	}
+	return func() tea.Msg {
+		m.wa.SendChatPresence(jid, composing)
+		return nil
+	}
+}
+
+func reconnectAfterDelay(d time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(d)
+		return reconnectMsg{}
+	}
+}
+
+func typingStopAfterIdle(gen int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(4 * time.Second)
+		return typingStopMsg{gen: gen}
+	}
+}
+
+func clearStatusAfterDelay(d time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(d)
+		return clearStatusMsg{}
+	}
+}
+
+// isTypingKey returns true for keys that represent real text input
+// (as opposed to navigation, control, or mode-switch keys).
+func isTypingKey(key string) bool {
+	switch key {
+	case "tab", "shift+tab", "ctrl+c", "ctrl+f", "ctrl+p", "enter", "esc",
+		"up", "down", "left", "right", "home", "end", "pgup", "pgdown",
+		"backspace", "delete":
+		return false
+	}
+	return !strings.HasPrefix(key, "ctrl+") && !strings.HasPrefix(key, "alt+") &&
+		!strings.HasPrefix(key, "f") // function keys
+}
+
+// --- Layout ---
+
 func (m *Model) layout() {
 	if m.state != StateChat || m.width <= 0 || m.height <= 0 {
 		return
 	}
 
-	// Reserve: title bar (1 line), status bar (1 line), input (3 lines)
 	titleH := 1
 	statusH := 1
 	inputH := m.input.Height()
@@ -562,7 +712,6 @@ func (m *Model) layout() {
 		bodyH = 1
 	}
 
-	// Chat list: 30% width, message view: 70%
 	chatListW := int(float64(m.width) * 0.30)
 	if chatListW < 15 {
 		chatListW = 15
@@ -576,6 +725,8 @@ func (m *Model) layout() {
 	m.input.SetSize(m.width, inputH)
 }
 
+// --- View ---
+
 func (m Model) View() string {
 	switch m.state {
 	case StateChat:
@@ -588,28 +739,12 @@ func (m Model) View() string {
 }
 
 func (m Model) renderChat() string {
-	// Title bar
-	tb := m.titleBar.View()
-
-	// Body: chat list | message view
-	body := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		m.chatList.View(),
-		m.chatView.View(),
-	)
-
-	// Input
-	inp := m.input.View()
-
-	// Status bar
-	sb := m.statusBar.View()
-
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		tb,
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.chatList.View(), m.chatView.View())
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.titleBar.View(),
 		body,
-		inp,
-		sb,
+		m.input.View(),
+		m.statusBar.View(),
 	)
 }
 
@@ -618,13 +753,9 @@ func (m Model) renderError() string {
 	if m.lastErr != nil {
 		errMsg = m.lastErr.Error()
 	}
-	return lipgloss.Place(
-		m.width,
-		m.height,
-		lipgloss.Center,
-		lipgloss.Center,
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
 		lipgloss.NewStyle().Bold(true).Foreground(theme.ColorError).Render("Connection error")+
-			"\n\n"+errMsg+
-			"\n\nPress Ctrl+C to exit.",
+			"\n\n"+errMsg+"\n\nPress Ctrl+C to exit.",
 	)
 }

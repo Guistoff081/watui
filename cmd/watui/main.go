@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/watui/watui/internal/app"
+	"github.com/watui/watui/internal/config"
 	"github.com/watui/watui/internal/store"
 	"github.com/watui/watui/internal/whatsapp"
 )
@@ -16,7 +17,8 @@ import (
 var version = "dev"
 
 func main() {
-	dataDir := flag.String("data-dir", "./data", "path to data directory")
+	cfg := config.Load()
+	dataDir := flag.String("data-dir", cfg.DataDir, "path to data directory")
 	flag.Parse()
 
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {

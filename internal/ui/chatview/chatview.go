@@ -2,6 +2,7 @@ package chatview
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -10,6 +11,12 @@ import (
 
 	"github.com/watui/watui/internal/theme"
 )
+
+// LoadOlderMsg is emitted when the user scrolls to the top and more history
+// may be available.
+type LoadOlderMsg struct {
+	ChatJID string
+}
 
 type Model struct {
 	viewport viewport.Model
@@ -20,20 +27,20 @@ type Model struct {
 	height   int
 	focused  bool
 	atBottom bool
+
+	// Lazy-load state
+	oldestTS time.Time // timestamp of the oldest message currently in view
+	loading  bool      // a LoadOlderMsg has been emitted; waiting for the response
+	noMore   bool      // store confirmed no messages exist before oldestTS
 }
 
 func New() Model {
 	vp := viewport.New(0, 0)
 	vp.MouseWheelEnabled = true
-	return Model{
-		viewport: vp,
-		atBottom: true,
-	}
+	return Model{atBottom: true}
 }
 
-func (m Model) Init() tea.Cmd {
-	return nil
-}
+func (m Model) Init() tea.Cmd { return nil }
 
 func (m *Model) SetSize(w, h int) {
 	m.width = w
@@ -43,19 +50,22 @@ func (m *Model) SetSize(w, h int) {
 	m.rebuildContent()
 }
 
-func (m *Model) SetFocused(focused bool) {
-	m.focused = focused
-}
+func (m *Model) SetFocused(focused bool) { m.focused = focused }
 
-func (m Model) Focused() bool {
-	return m.focused
-}
+func (m Model) Focused() bool { return m.focused }
 
 func (m *Model) SetChat(jid string, isGroup bool, messages []theme.Message) {
 	m.chatJID = jid
 	m.isGroup = isGroup
 	m.messages = messages
 	m.atBottom = true
+	m.loading = false
+	m.noMore = false
+	if len(messages) > 0 {
+		m.oldestTS = messages[0].Timestamp
+	} else {
+		m.oldestTS = time.Time{}
+	}
 	m.rebuildContent()
 	m.viewport.GotoBottom()
 }
@@ -72,6 +82,43 @@ func (m *Model) AppendMessage(msg theme.Message) {
 	}
 }
 
+// PrependMessages inserts older messages above the current history and adjusts
+// the viewport so the previously-visible content stays in view.
+func (m *Model) PrependMessages(msgs []theme.Message) {
+	if len(msgs) == 0 {
+		m.loading = false
+		return
+	}
+
+	m.loading = false
+	m.oldestTS = msgs[0].Timestamp
+
+	// Estimate how many rendered lines the new messages will add.
+	var newLines []string
+	var lastDate string
+	for _, msg := range msgs {
+		dateStr := msg.Timestamp.Format("2006-01-02")
+		if dateStr != lastDate {
+			newLines = append(newLines, renderDateSeparator(msg.Timestamp, m.width))
+			lastDate = dateStr
+		}
+		newLines = append(newLines, renderMessage(msg, m.width, m.isGroup))
+	}
+	addedLines := strings.Count(strings.Join(newLines, "\n"), "\n") + 1
+
+	m.messages = append(msgs, m.messages...)
+	savedOffset := m.viewport.YOffset
+	m.rebuildContent()
+	m.viewport.SetYOffset(savedOffset + addedLines)
+}
+
+// SetNoMoreMessages signals that the store has no messages older than what is
+// currently loaded, preventing further LoadOlderMsg emissions.
+func (m *Model) SetNoMoreMessages() {
+	m.loading = false
+	m.noMore = true
+}
+
 func (m *Model) UpdateMessageStatus(msgID, status string) {
 	for i := range m.messages {
 		if m.messages[i].ID == msgID {
@@ -82,9 +129,9 @@ func (m *Model) UpdateMessageStatus(msgID, status string) {
 	}
 }
 
-func (m Model) ChatJID() string {
-	return m.chatJID
-}
+func (m Model) ChatJID() string { return m.chatJID }
+
+func (m Model) OldestTimestamp() time.Time { return m.oldestTS }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -109,24 +156,32 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	m.atBottom = m.viewport.AtBottom()
-	return m, nil
+
+	// Emit a lazy-load request when scrolled to the top and there's more history.
+	var cmd tea.Cmd
+	if m.viewport.AtTop() &&
+		m.viewport.TotalLineCount() > m.viewport.Height &&
+		!m.loading && !m.noMore &&
+		m.chatJID != "" && len(m.messages) > 0 {
+		m.loading = true
+		jid := m.chatJID
+		cmd = func() tea.Msg { return LoadOlderMsg{ChatJID: jid} }
+	}
+
+	return m, cmd
 }
 
 func (m Model) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
-
 	if m.chatJID == "" {
-		placeholder := lipgloss.NewStyle().
+		return lipgloss.NewStyle().
 			Foreground(theme.ColorTextDim).
-			Width(m.width).
-			Height(m.height).
+			Width(m.width).Height(m.height).
 			Align(lipgloss.Center, lipgloss.Center).
 			Render("Select a conversation to start chatting")
-		return placeholder
 	}
-
 	return m.viewport.View()
 }
 
@@ -134,9 +189,16 @@ func (m *Model) rebuildContent() {
 	if m.width <= 0 {
 		return
 	}
-
 	var lines []string
 	var lastDate string
+
+	if m.loading {
+		lines = append(lines, lipgloss.NewStyle().
+			Foreground(theme.ColorTextDim).
+			Width(m.width).
+			Align(lipgloss.Center).
+			Render("Loading older messages..."))
+	}
 
 	for _, msg := range m.messages {
 		dateStr := msg.Timestamp.Format("2006-01-02")
@@ -147,6 +209,5 @@ func (m *Model) rebuildContent() {
 		lines = append(lines, renderMessage(msg, m.width, m.isGroup))
 	}
 
-	content := strings.Join(lines, "\n")
-	m.viewport.SetContent(content)
+	m.viewport.SetContent(strings.Join(lines, "\n"))
 }

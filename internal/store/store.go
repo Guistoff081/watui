@@ -177,3 +177,40 @@ func (s *Store) UpdateMessageStatus(ctx context.Context, msgID, status string) e
 	`, status, msgID)
 	return err
 }
+
+// GetMessagesBefore returns up to limit messages for chatJID with timestamps
+// strictly before before, ordered oldest-first (for prepending to a loaded history).
+func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before time.Time, limit int) ([]theme.Message, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
+		FROM messages
+		WHERE chat_jid = ? AND timestamp < ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, chatJID, before.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []theme.Message
+	for rows.Next() {
+		var msg theme.Message
+		var ts int64
+		if err := rows.Scan(&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName,
+			&msg.Content, &ts, &msg.IsFromMe, &msg.Status); err != nil {
+			return nil, err
+		}
+		msg.Timestamp = time.Unix(ts, 0)
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Reverse DESC result to get oldest-first order.
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}

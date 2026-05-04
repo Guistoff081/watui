@@ -95,6 +95,10 @@ func (m *Model) SetFocused(focused bool) {
 
 func (m Model) Focused() bool { return m.focused }
 
+// IsComposing returns true when the input is active in text mode (not in file/audio
+// path prompt). Used by the app layer to decide whether to send typing presence.
+func (m Model) IsComposing() bool { return m.focused && m.mode == modeText }
+
 func (m Model) Value() string { return m.textarea.Value() }
 
 func (m *Model) Reset() { m.textarea.Reset() }
