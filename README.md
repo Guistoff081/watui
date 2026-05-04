@@ -22,11 +22,41 @@ A terminal UI client for WhatsApp, built with Go + [Bubble Tea](https://github.c
 
 ## Install
 
+### Option 1 — go install (quickest)
+
 ```bash
-git clone https://github.com/elissonguimel/watui
-cd watui
-go build -o watui ./cmd/watui/
+go install github.com/watui/watui/cmd/watui@latest
 ```
+
+Installs the `watui` binary to `$(go env GOPATH)/bin` (usually `~/go/bin`). Requires GCC for the SQLite CGo dependency.
+
+### Option 2 — build from source
+
+```bash
+git clone https://github.com/Guistoff081/watui
+cd watui
+make install        # installs to ~/go/bin
+# or just build locally:
+make build          # produces ./watui
+```
+
+### Option 3 — release archive
+
+Download a pre-built archive from the [Releases](https://github.com/Guistoff081/watui/releases) page, extract, and place the binary on your `$PATH`:
+
+```bash
+tar xzf watui-<version>-linux-amd64.tar.gz
+sudo mv watui /usr/local/bin/
+```
+
+### Build your own archive
+
+```bash
+make dist                        # current platform
+GOOS=linux GOARCH=arm64 make dist   # cross-compile (requires matching C cross-compiler)
+```
+
+Archives are placed in `dist/`.
 
 ## Usage
 

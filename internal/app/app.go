@@ -83,7 +83,7 @@ type Model struct {
 	conversations map[string]theme.Conversation
 }
 
-func NewModel(wa WAClient, s *store.Store) Model {
+func NewModel(wa WAClient, s *store.Store, version string) Model {
 	return Model{
 		state:         StateAuth,
 		wa:            wa,
@@ -94,7 +94,7 @@ func NewModel(wa WAClient, s *store.Store) Model {
 		chatView:      chatview.New(),
 		input:         input.New(),
 		titleBar:      titlebar.New(),
-		statusBar:     statusbar.New("v0.1"),
+		statusBar:     statusbar.New(version),
 		chatMessages:  make(map[string][]theme.Message),
 		conversations: make(map[string]theme.Conversation),
 	}

@@ -1,5 +1,6 @@
 # Binaries
-watui
+/watui
+/dist/
 *.exe
 
 # Data
