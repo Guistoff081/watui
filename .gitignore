@@ -1,0 +1,25 @@
+# Binaries
+watui
+*.exe
+
+# Data
+*.db
+*.db-wal
+*.db-shm
+
+# Config (may contain sensitive data)
+# config.toml
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
