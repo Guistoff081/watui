@@ -3,6 +3,10 @@ package whatsapp
 import (
 	"context"
 	"fmt"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -134,6 +138,100 @@ func (c *Client) SendTextMessage(jid types.JID, text string) tea.Cmd {
 			Timestamp: resp.Timestamp,
 		}
 	}
+}
+
+const maxUploadSize = 64 << 20 // 64 MB
+
+// SendFileMessage reads path from disk, uploads it to WhatsApp, and sends it as a document.
+func (c *Client) SendFileMessage(jid types.JID, path string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("read file: %w", err)}
+		}
+		if len(data) > maxUploadSize {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("file too large (max 64 MB)")}
+		}
+
+		mimeType := detectMIME(path, data)
+
+		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaDocument)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("upload: %w", err)}
+		}
+
+		msg := &waE2E.Message{
+			DocumentMessage: &waE2E.DocumentMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				MediaKey:      uploaded.MediaKey,
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uploaded.FileLength),
+				Mimetype:      proto.String(mimeType),
+				FileName:      proto.String(filepath.Base(path)),
+			},
+		}
+
+		resp, err := c.wm.SendMessage(context.Background(), jid, msg)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: err}
+		}
+		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+	}
+}
+
+// SendAudioMessage reads path from disk, uploads it, and sends it as a PTT voice message.
+// The file should be OGG Opus for best compatibility with WhatsApp clients.
+func (c *Client) SendAudioMessage(jid types.JID, path string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("read file: %w", err)}
+		}
+		if len(data) > maxUploadSize {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("file too large (max 64 MB)")}
+		}
+
+		mimeType := detectMIME(path, data)
+
+		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaAudio)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("upload: %w", err)}
+		}
+
+		msg := &waE2E.Message{
+			AudioMessage: &waE2E.AudioMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				MediaKey:      uploaded.MediaKey,
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uploaded.FileLength),
+				Mimetype:      proto.String(mimeType),
+				PTT:           proto.Bool(true),
+			},
+		}
+
+		resp, err := c.wm.SendMessage(context.Background(), jid, msg)
+		if err != nil {
+			return theme.MessageSendFailedMsg{ChatJID: jid, Err: err}
+		}
+		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+	}
+}
+
+// detectMIME returns the MIME type for path, using file extension first and
+// content sniffing as a fallback.
+func detectMIME(path string, data []byte) string {
+	if t := mime.TypeByExtension(filepath.Ext(path)); t != "" {
+		return t
+	}
+	sniff := data
+	if len(sniff) > 512 {
+		sniff = sniff[:512]
+	}
+	return http.DetectContentType(sniff)
 }
 
 // MarkRead sends read receipts for the given message IDs.

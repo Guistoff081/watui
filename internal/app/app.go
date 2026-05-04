@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -40,6 +41,8 @@ type WAClient interface {
 	Connect() tea.Cmd
 	Disconnect()
 	SendTextMessage(jid types.JID, text string) tea.Cmd
+	SendFileMessage(jid types.JID, path string) tea.Cmd
+	SendAudioMessage(jid types.JID, path string) tea.Cmd
 	MarkRead(chatJID types.JID, sender types.JID, messageIDs []string)
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
@@ -245,6 +248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case input.SendMsg:
 		return m.handleSendMessage(msg.Text)
 
+	case input.SendFileMsg:
+		return m.handleSendFile(msg.Path)
+
+	case input.SendAudioMsg:
+		return m.handleSendAudio(msg.Path)
+
 	case error:
 		m.state = StateError
 		m.lastErr = msg
@@ -446,6 +455,72 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 	}
 
 	return *m, m.wa.SendTextMessage(jid, text)
+}
+
+func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
+	chatJID := m.chatView.ChatJID()
+	if chatJID == "" {
+		return *m, nil
+	}
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return *m, nil
+	}
+
+	label := fmt.Sprintf("[file] %s", filepath.Base(path))
+	msg := theme.Message{
+		ID:        fmt.Sprintf("sending-%d", time.Now().UnixNano()),
+		ChatJID:   chatJID,
+		Content:   label,
+		Timestamp: time.Now(),
+		IsFromMe:  true,
+		Status:    "sending",
+	}
+	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
+	m.chatView.AppendMessage(msg)
+
+	if conv, ok := m.conversations[chatJID]; ok {
+		conv.LastMessage = label
+		conv.LastMsgTime = msg.Timestamp
+		m.conversations[chatJID] = conv
+		m.chatList.UpsertConversation(conv)
+		_ = m.store.UpsertConversation(context.Background(), conv)
+	}
+
+	return *m, m.wa.SendFileMessage(jid, path)
+}
+
+func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
+	chatJID := m.chatView.ChatJID()
+	if chatJID == "" {
+		return *m, nil
+	}
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return *m, nil
+	}
+
+	label := fmt.Sprintf("[voice] %s", filepath.Base(path))
+	msg := theme.Message{
+		ID:        fmt.Sprintf("sending-%d", time.Now().UnixNano()),
+		ChatJID:   chatJID,
+		Content:   label,
+		Timestamp: time.Now(),
+		IsFromMe:  true,
+		Status:    "sending",
+	}
+	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
+	m.chatView.AppendMessage(msg)
+
+	if conv, ok := m.conversations[chatJID]; ok {
+		conv.LastMessage = label
+		conv.LastMsgTime = msg.Timestamp
+		m.conversations[chatJID] = conv
+		m.chatList.UpsertConversation(conv)
+		_ = m.store.UpsertConversation(context.Background(), conv)
+	}
+
+	return *m, m.wa.SendAudioMessage(jid, path)
 }
 
 func (m *Model) cycleFocus(dir int) {

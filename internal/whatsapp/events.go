@@ -206,5 +206,38 @@ func extractTextContent(msg *waProto.Message) string {
 	if msg.ExtendedTextMessage != nil && msg.ExtendedTextMessage.Text != nil {
 		return *msg.ExtendedTextMessage.Text
 	}
+	if msg.ImageMessage != nil {
+		if c := msg.ImageMessage.GetCaption(); c != "" {
+			return "[image] " + c
+		}
+		return "[image]"
+	}
+	if msg.VideoMessage != nil {
+		if c := msg.VideoMessage.GetCaption(); c != "" {
+			return "[video] " + c
+		}
+		return "[video]"
+	}
+	if msg.AudioMessage != nil {
+		if msg.AudioMessage.GetPTT() {
+			return "[voice message]"
+		}
+		return "[audio]"
+	}
+	if msg.DocumentMessage != nil {
+		if n := msg.DocumentMessage.GetFileName(); n != "" {
+			return "[file] " + n
+		}
+		return "[file]"
+	}
+	if msg.StickerMessage != nil {
+		return "[sticker]"
+	}
+	if msg.LocationMessage != nil {
+		return "[location]"
+	}
+	if msg.ContactMessage != nil {
+		return "[contact] " + msg.ContactMessage.GetDisplayName()
+	}
 	return ""
 }

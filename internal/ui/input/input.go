@@ -4,22 +4,43 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/watui/watui/internal/theme"
 )
 
-// SendMsg is emitted when the user presses Enter to send a message.
+// SendMsg is emitted when the user presses Enter to send a text message.
 type SendMsg struct {
 	Text string
 }
 
+// SendFileMsg is emitted when the user confirms a file path to send as a document.
+type SendFileMsg struct {
+	Path string
+}
+
+// SendAudioMsg is emitted when the user confirms an audio file path to send as PTT.
+type SendAudioMsg struct {
+	Path string
+}
+
+type inputMode int
+
+const (
+	modeText  inputMode = iota
+	modeFile            // Ctrl+F: file path prompt
+	modeAudio           // Ctrl+P: audio file path prompt
+)
+
 type Model struct {
-	textarea textarea.Model
-	width    int
-	height   int
-	focused  bool
+	textarea  textarea.Model
+	pathInput textinput.Model
+	mode      inputMode
+	width     int
+	height    int
+	focused   bool
 }
 
 func New() Model {
@@ -38,41 +59,45 @@ func New() Model {
 	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(theme.ColorTextDim)
 	ta.Blur()
 
+	pi := textinput.New()
+	pi.CharLimit = 4096
+
 	return Model{
-		textarea: ta,
-		height:   3, // border (1) + 2 lines of textarea
+		textarea:  ta,
+		pathInput: pi,
+		height:    4, // top border (1) + textarea rows (2) + hint row (1)
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	return nil
-}
+func (m Model) Init() tea.Cmd { return nil }
 
 func (m *Model) SetSize(w, _ int) {
 	m.width = w
-	m.textarea.SetWidth(w - 2) // account for border padding
+	m.textarea.SetWidth(w - 2)
+	if w > 14 {
+		m.pathInput.Width = w - 14
+	} else {
+		m.pathInput.Width = w / 2
+	}
 }
 
 func (m *Model) SetFocused(focused bool) {
 	m.focused = focused
-	if focused {
-		m.textarea.Focus()
-	} else {
+	if !focused {
+		// Reset to text mode whenever focus leaves the panel.
+		m.mode = modeText
+		m.pathInput.Blur()
 		m.textarea.Blur()
+	} else {
+		m.textarea.Focus()
 	}
 }
 
-func (m Model) Focused() bool {
-	return m.focused
-}
+func (m Model) Focused() bool { return m.focused }
 
-func (m Model) Value() string {
-	return m.textarea.Value()
-}
+func (m Model) Value() string { return m.textarea.Value() }
 
-func (m *Model) Reset() {
-	m.textarea.Reset()
-}
+func (m *Model) Reset() { m.textarea.Reset() }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.focused {
@@ -81,21 +106,65 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEnter:
-			text := strings.TrimSpace(m.textarea.Value())
-			if text != "" {
-				m.textarea.Reset()
-				return m, func() tea.Msg {
-					return SendMsg{Text: text}
+		switch m.mode {
+		case modeFile, modeAudio:
+			switch msg.String() {
+			case "esc":
+				m.mode = modeText
+				m.pathInput.Reset()
+				m.pathInput.Blur()
+				taCmd := m.textarea.Focus()
+				return m, taCmd
+
+			case "enter":
+				path := strings.TrimSpace(m.pathInput.Value())
+				if path == "" {
+					return m, nil
 				}
+				prevMode := m.mode
+				m.pathInput.Reset()
+				m.mode = modeText
+				m.pathInput.Blur()
+				taCmd := m.textarea.Focus()
+				if prevMode == modeFile {
+					return m, tea.Batch(taCmd, func() tea.Msg { return SendFileMsg{Path: path} })
+				}
+				return m, tea.Batch(taCmd, func() tea.Msg { return SendAudioMsg{Path: path} })
 			}
-			return m, nil
+
+		case modeText:
+			switch msg.String() {
+			case "ctrl+f":
+				m.mode = modeFile
+				m.pathInput.Placeholder = "File path..."
+				m.textarea.Blur()
+				m.pathInput.Reset()
+				return m, m.pathInput.Focus()
+
+			case "ctrl+p":
+				m.mode = modeAudio
+				m.pathInput.Placeholder = "Audio file path..."
+				m.textarea.Blur()
+				m.pathInput.Reset()
+				return m, m.pathInput.Focus()
+
+			case "enter":
+				text := strings.TrimSpace(m.textarea.Value())
+				if text != "" {
+					m.textarea.Reset()
+					return m, func() tea.Msg { return SendMsg{Text: text} }
+				}
+				return m, nil
+			}
 		}
 	}
 
 	var cmd tea.Cmd
-	m.textarea, cmd = m.textarea.Update(msg)
+	if m.mode == modeText {
+		m.textarea, cmd = m.textarea.Update(msg)
+	} else {
+		m.pathInput, cmd = m.pathInput.Update(msg)
+	}
 	return m, cmd
 }
 
@@ -111,10 +180,26 @@ func (m Model) View() string {
 		style = theme.InputStyle
 	}
 
-	return style.Width(m.width).Render(m.textarea.View())
+	dimStyle := lipgloss.NewStyle().Foreground(theme.ColorTextDim)
+	promptStyle := lipgloss.NewStyle().Foreground(theme.ColorPrimary).Bold(true)
+
+	var content string
+	switch m.mode {
+	case modeFile:
+		prompt := promptStyle.Render("Attach: ")
+		content = prompt + m.pathInput.View() +
+			"\n\n" + dimStyle.Render("Enter to send  Esc to cancel")
+	case modeAudio:
+		prompt := promptStyle.Render("Audio:  ")
+		content = prompt + m.pathInput.View() +
+			"\n\n" + dimStyle.Render("Enter to send  Esc to cancel")
+	default:
+		hint := dimStyle.Render("ctrl+f attach  ctrl+p audio")
+		content = m.textarea.View() + "\n" + hint
+	}
+
+	return style.Width(m.width).Render(content)
 }
 
-// Height returns the total height of the input component (including border).
-func (m Model) Height() int {
-	return m.height
-}
+// Height returns the total rendered height of the input component.
+func (m Model) Height() int { return m.height }
