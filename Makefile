@@ -8,13 +8,16 @@ DIST    := dist
 GOOS   ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 
-.PHONY: build run install clean dist help
+.PHONY: build run run-debug install clean dist help
 
 build: ## Compile binary for the current platform
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/watui/
 
 run: build ## Build and run with ./data as the data directory
 	./$(BINARY) --data-dir ./data
+
+run-debug: build ## Build and run with debug logging to ./data/watui-debug.log
+	WATUI_DEBUG=1 ./$(BINARY) --data-dir ./data
 
 install: ## Install to $(GOPATH)/bin (falls back to ~/go/bin)
 	go install $(LDFLAGS) ./cmd/watui/

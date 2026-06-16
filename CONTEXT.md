@@ -4,8 +4,6 @@
 
 Construir do zero um cliente TUI para WhatsApp com todas as features do WhatsApp Web, começando pelo MVP de core messaging.
 
-O repositório está no inicio, cosntruindo as fundações do projeto
-
 Stack: Go + Bubble Tea (Charm) + whatsmeow.
 
 ### Riscos
@@ -23,9 +21,10 @@ Stack: Go + Bubble Tea (Charm) + whatsmeow.
 | WhatsApp | [go.mau.fi/whatsmeow](http://go.mau.fi/whatsmeow) (multi-device, WebSocket, Signal protocol) |
 | TUI Framework | bubbletea + bubbles + lipgloss (Charm ecosystem) |
 | Persistência | SQLite (mattn/go-sqlite3) |
-| QR Code | skip2/go-qrcode (bitmap → half-block chars) |
+| QR Code | skip2/go-qrcode (half-block + sextant block chars) |
 | Config | TOML (BurntSushi/toml) |
-| Terminal | Ghostty (suporta Kitty graphics protocol p/ futuro media) |
+| Terminal | Ghostty (suporta Kitty graphics protocol para futuro media) |
+| File picker | zenity / kdialog / qarma / yad (GUI dialog, detectado automaticamente) |
 
 ---
 
@@ -37,29 +36,44 @@ watui/
 ├── internal/
 │   ├── app/
 │   │   ├── app.go                 # Root Bubble Tea model (orchestrator)
-│   │   ├── messages.go            # Custom tea.Msg types
-│   │   ├── keymap.go              # Key bindings
-│   │   └── styles.go              # Lipgloss theme/styles
+│   │   ├── messages.go            # (reservado, vazio — tipos estão em theme/)
+│   │   ├── keymap.go              # (reservado, vazio — keymaps estão em theme/)
+│   │   └── styles.go              # (reservado, vazio — estilos estão em theme/)
+│   ├── theme/                     # Pacote central: modelos, tea.Msg, estilos, keymaps
+│   │   ├── models.go              # Conversation, Message structs + todos tea.Msg types
+│   │   ├── styles.go              # Lipgloss styles compartilhados
+│   │   └── keymap.go              # Keybindings compartilhados
 │   ├── whatsapp/
-│   │   ├── client.go              # whatsmeow wrapper, connect/send/events
-│   │   ├── events.go              # whatsmeow events → tea.Msg bridge
-│   │   └── history.go             # History sync processor
+│   │   ├── client.go              # whatsmeow wrapper: connect, send, LID resolution
+│   │   └── events.go              # whatsmeow events → theme.*Msg bridge
 │   ├── ui/
-│   │   ├── auth/qr.go             # QR code auth screen
+│   │   ├── auth/
+│   │   │   ├── qr.go              # QR code auth screen (half-block + sextant rendering)
+│   │   │   └── qr_test.go
 │   │   ├── chatlist/
 │   │   │   ├── chatlist.go        # Chat list panel (bubbles/list)
-│   │   │   └── item.go            # list.Item for conversations
+│   │   │   └── item.go            # list.Item para conversas
 │   │   ├── chatview/
-│   │   │   ├── chatview.go        # Message viewport (bubbles/viewport)
-│   │   │   └── message.go         # Message rendering helpers
-│   │   ├── input/input.go         # Text input (bubbles/textarea)
-│   │   ├── statusbar/statusbar.go # Connection status, info
-│   │   └── titlebar/titlebar.go   # Active chat info
-│   ├── config/config.go           # TOML config loading
-│   └── store/
-│       ├── store.go               # App-level SQLite (conversations, messages)
-│       ├── models.go              # Conversation, Message structs
-│       └── migrations.go          # DB schema
+│   │   │   ├── chatview.go        # Message viewport (bubbles/viewport) + lazy-load
+│   │   │   └── message.go         # Renderização de mensagens
+│   │   ├── input/
+│   │   │   ├── input.go           # Text input (bubbles/textarea) + path input
+│   │   │   ├── filepicker.go      # GUI file picker (zenity/kdialog/qarma/yad)
+│   │   │   ├── input_test.go
+│   │   │   └── filepicker_test.go
+│   │   ├── statusbar/statusbar.go # Conexão, versão, JID
+│   │   └── titlebar/titlebar.go   # Nome do chat ativo, typing indicator
+│   ├── store/
+│   │   ├── store.go               # App-level SQLite (conversations + messages)
+│   │   └── migrations.go          # Schema + migrações
+│   ├── config/
+│   │   ├── config.go              # TOML config loading
+│   │   └── config_test.go
+│   └── debug/
+│       ├── logger.go              # Debug logger (zerolog → arquivo)
+│       └── logger_test.go
+├── data/                          # gitignored: whatsmeow.db, watui.db, debug.log
+├── mise.toml
 ├── go.mod
 ├── Makefile
 └── .gitignore
@@ -74,12 +88,13 @@ O desafio central é conectar o modelo event-driven do whatsmeow com o loop Mode
 Solução: `p.Send()` como bridge.
 
 ```
-whatsmeow WebSocket → events.go handler → c.sendMsg(TypedMsg) → p.Send() → tea.Program loop → app.Update()
+whatsmeow WebSocket → events.go handler → c.sendMsg(theme.Msg) → p.Send() → tea.Program loop → app.Update()
 ```
 
-- `whatsapp.Client` recebe `p.Send` como callback na inicialização.
-- Cada evento whatsmeow é traduzido para um `tea.Msg` tipado.
-- O root `app.Model` roteia mensagens para os child models apropriados.
+- `whatsapp.Client` recebe `p.Send` como callback após criação do programa.
+- Cada evento whatsmeow é traduzido para um `tea.Msg` tipado em `theme/`.
+- O `internal/theme/` não importa nada do restante do projeto (evita import cycles).
+- O root `app.Model` roteia mensagens para os child models.
 
 #### Sequência de startup
 
@@ -89,16 +104,16 @@ whatsmeow WebSocket → events.go handler → c.sendMsg(TypedMsg) → p.Send() �
 4. Create `whatsapp.Client` (sendMsg = nil temporariamente)
 5. Create `app.Model` → Create `tea.Program`
 6. Set `waClient.sendMsg = p.Send`
-7. [`p.Run](http://p.Run)()` → `Init()` chama `waClient.Connect()` (QR flow começa)
+7. `p.Run()` → `Init()` chama `waClient.Connect()` (QR flow ou reconexão)
 
 ---
 
 ### Layout da UI
 
-- **Title bar** (1 linha): nome do contato/grupo + info
+- **Title bar** (1 linha): nome do contato/grupo + typing indicator
 - **Corpo**: painel esquerdo (Chat list ~30%) + painel direito (Message view ~70%)
-- **Input** (3 linhas): textarea + hint de envio
-- **Status bar** (1 linha): conexão + versão + jid
+- **Input** (3 linhas): textarea + hints de atalhos
+- **Status bar** (1 linha): conexão + versão + JID
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -108,15 +123,16 @@ whatsmeow WebSocket → events.go handler → c.sendMsg(TypedMsg) → p.Send() �
 │  30% width    │  70% width                                   │
 │   > Alice [2] │  Alice                         10:30 AM      │
 │     Bob       │  Oi, tudo bem?                               │
-│     Grupo [5] │                         Você  10:31 AM       │
+│     Grupo [5] │                         Você  10:31 AM ✓✓    │
 │              ├──────────────────────────────────────────────┤
-│              │ INPUT: Digite uma mensagem... [Enter: send]   │
+│              │ INPUT: Digite uma mensagem...                 │
+│              │ ctrl+f attach  ctrl+p audio  ctrl+o browse    │
 ├──────────────┴──────────────────────────────────────────────┤
 │ STATUS: ● Conectado | watui v0.1 | user@s.whatsapp.net       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-QR Auth Screen: tela centralizada com QR em half-block chars + spinner.
+QR Auth Screen: tela centralizada com QR em half-block chars (ou sextant blocks quando necessário) + spinner.
 
 ---
 
@@ -132,120 +148,229 @@ QR Auth Screen: tela centralizada com QR em half-block chars + spinner.
 | Esc | — | Focar chat list | Limpar/defocar |
 | Ctrl+C | Sair | Sair | Sair |
 | / | Buscar chats | — | — |
-| Ctrl+U/D | — | Page up/down | — |
-| g/G | Primeiro/último | Topo/fim | — |
+| PgUp/PgDn | — | Meia tela up/down | — |
+| g/G | — | Topo/fim | — |
+| Ctrl+F | — | — | Modo attach (path) |
+| Ctrl+P | — | — | Modo audio (path) |
+| Ctrl+O | — | — | Abrir GUI file picker |
 
 ---
 
 ### Data Models
 
 ```go
+// em internal/theme/models.go
+
 type Conversation struct {
-	JID, Name    string
-	IsGroup      bool
-	LastMessage  string
-	LastMsgTime  time.Time
-	UnreadCount  int
-	IsPinned     bool
+    JID, Name    string
+    IsGroup      bool
+    LastMessage  string
+    LastMsgTime  time.Time
+    UnreadCount  int
+    IsPinned     bool
 }
 
 type Message struct {
-	ID, ChatJID, SenderJID, SenderName string
-	Content    string
-	Timestamp  time.Time
-	IsFromMe   bool
-	Status     string // sending/sent/delivered/read/received/failed
+    ID, ChatJID, SenderJID, SenderName string
+    Content    string
+    Timestamp  time.Time
+    IsFromMe   bool
+    Status     string // sending/sent/delivered/read/received/failed
 }
 ```
 
-SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id, FK: chat_jid, index por chat+timestamp).
+SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat_jid, index por chat+timestamp).
 
 ---
 
 ### Fases de Implementação
 
-#### Fase 1: Setup + Conexão WhatsApp + QR Auth
-
-Arquivos: `go.mod`, `cmd/watui/main.go`, `internal/whatsapp/client.go`, `internal/whatsapp/events.go`, `internal/app/app.go`, `internal/app/messages.go`, `internal/ui/auth/qr.go`, `.gitignore`
+#### ✅ Fase 1: Setup + Conexão WhatsApp + QR Auth
 
 - Inicializar módulo Go com dependências
 - whatsmeow wrapper com Connect/Disconnect e QR flow
 - Bridge de eventos via `p.Send()`
 - Tela de QR code com half-block rendering + spinner
-- Root model com estados Auth → Chat (placeholder)
+- Root model com estados Auth → Chat
 
-Verificação: rodar app, ver QR no terminal, escanear com WhatsApp, ver "Conectado!".
-
-#### Fase 2: Shell TUI (Layout + Painéis)
-
-Arquivos: `internal/app/styles.go`, `internal/app/keymap.go`, `internal/ui/chatlist/chatlist.go`, `internal/ui/chatlist/item.go`, `internal/ui/chatview/chatview.go`, `internal/ui/input/input.go`, `internal/ui/statusbar/statusbar.go`, `internal/ui/titlebar/titlebar.go`
+#### ✅ Fase 2: Shell TUI (Layout + Painéis)
 
 - Layout split-pane com lipgloss (`JoinHorizontal`/`JoinVertical`)
-- Todos os painéis com conteúdo placeholder
 - Focus management (Tab cycling, border highlight)
 - Resize handling (`WindowSizeMsg` → recalcular dimensões)
+- Status bar, title bar, placeholders
 
-Verificação: após auth, ver layout split-pane. Tab entre painéis. Resize funciona.
-
-#### Fase 3: Chat List com Dados Reais
-
-Arquivos: `internal/store/store.go`, `internal/store/models.go`, `internal/store/migrations.go`, `internal/whatsapp/history.go`
+#### ✅ Fase 3: Chat List com Dados Reais
 
 - App-level SQLite store (separado do whatsmeow store)
-- History sync: processar eventos → popular conversations + messages
+- History sync: processar `*events.HistorySync` → conversations + messages
 - Chat list mostra conversas reais, ordenadas por última mensagem
-- Incoming messages atualizam a lista (bump to top, preview, unread)
+- Incoming messages atualizam a lista (bump, preview, unread badge)
 
-Verificação: Auth → history sync → conversas reais aparecem. Receber msg → lista atualiza.
+#### ✅ Fase 4: Exibição de Mensagens
 
-#### Fase 4: Exibição de Mensagens
-
-Arquivos: `internal/ui/chatview/message.go`, updates em `chatview.go`, `app.go`, `titlebar.go`
-
-- Selecionar chat → carregar últimas 50 msgs do store
+- Selecionar chat → carregar mensagens mais recentes do store
 - Rendering: msgs próprias alinhadas à direita, recebidas à esquerda
 - Nomes de remetentes em cores distintas (grupos)
-- Separadores de data, timestamps
-- Scroll com viewport, auto-scroll no fundo
-- Novas msgs aparecem em real-time
+- Separadores de data, timestamps, status icons (◷ ✓ ✓✓)
+- Scroll com viewport, auto-scroll ao fundo
+- Novas mensagens aparecem em real-time
+- Lazy-load de mensagens antigas ao scrollar para o topo
 
-Verificação: selecionar chat, ver histórico. Scroll up/down. Receber msg → aparece no fundo.
+#### ✅ Fase 5: Envio de Mensagens
 
-#### Fase 5: Envio de Mensagens
-
-Arquivos: updates em `input.go`, `app.go`, `whatsapp/client.go`, `whatsapp/events.go`
-
-- Enter envia, Shift+Enter nova linha
+- Enter envia, textarea suporta multi-linha
+- ID gerado no cliente (mesmo ID para placeholder e envio real)
 - UI otimista: msg aparece imediatamente com status "sending"
 - `waClient.SendTextMessage()` via `tea.Cmd` assíncrono
-- `MessageSentMsg` atualiza status para "sent" ou "failed"
-- Receipts (delivered/read) via `*events.Receipt`
+- Status atualizado via `MessageSentMsg` / receipts (`delivered`/`read`)
+- Envio de arquivos (Ctrl+F) e áudio/voz (Ctrl+P) como documentos
+- GUI file picker integrado (Ctrl+O) via zenity/kdialog/qarma/yad
+- Path normalization: shell quoting, backslash escape, tilde expansion
 
-Verificação: enviar msg → aparece na hora. Checar outro dispositivo. Receipts atualizam.
+#### ✅ Fase 6: Polish & Resiliência
 
-#### Fase 6: Polish
-
-Arquivos: `internal/config/config.go`, `Makefile`, updates em statusbar, chatlist, chatview, whatsapp/client
-
-- Config TOML (`~/.config/watui/config.toml`): theme, keybindings, UI options
-- Unread badges com clear ao abrir chat + MarkRead()
-- Typing indicators (send + receive)
+- Config TOML (`~/.config/watui/config.toml`)
+- Unread badges com clear ao abrir chat + `MarkRead()` para WhatsApp
+- Typing indicators (envio e recebimento)
 - Reconexão automática (whatsmeow built-in) + status visual
-- Error handling: status bar msgs, failed message indicators
-- Makefile (build, run, clean, install)
-- Lazy-load mensagens antigas ao scrollar para cima
+- Identificação do device: `Os: "watui"`, `PlatformType: DESKTOP`
+- Resolução de nomes LID-aware (`@lid` → telefone → contato)
+- Deduplicação de mensagens (group pkmsg+skmsg double-dispatch)
+- Merge de history-sync com cache live (sem overwrite de msgs novas)
+- Ordenação correta: GetMessages carrega as mais recentes (DESC+reverse)
+- Debug logger: zerolog → arquivo (`--debug` flag)
+- QR responsivo: half-blocks (1×2) com fallback sextant blocks (2×3)
 
-Verificação: uso completo end-to-end. Desconectar WiFi → reconecta. Resize. Unread counts. Typing.
+---
+
+### 🔜 Fase 7: Renderização de Media
+
+**Objetivo:** exibir imagens, figurinhas, GIFs e representar áudios na UI.
+
+- Download de media on-demand via `wm.DownloadAny()` com cache local em `data/media/`
+- Imagens e GIFs: renderizar via **Kitty graphics protocol** (Ghostty suporta nativamente); fallback para sixel; fallback textual `[imagem]` + dimensões
+- Figurinhas (sticker): mesmo pipeline que imagem (WebP → display)
+- GIF animado: exibir primeiro frame estático com indicador `[GIF]`
+- Áudio/voz: exibir duração, waveform em ASCII blocks (amplitude aproximada)
+- Reprodução de áudio via subprocess (`mpv --no-video` / `ffplay -nodisp` / `aplay`) com tecla de atalho (e.g. `Enter` em mensagem de áudio selecionada)
+- Atualizar `theme.Message` para carregar `MediaType`, `MediaURL`, `MediaKey`, `MediaPath` (caminho local do cache)
+- Migração do schema: adicionar colunas de media na tabela `messages`
+
+**Verificação:** receber imagem → thumbnail aparece na conversa. Pressionar tecla em áudio → toca no terminal.
+
+---
+
+### 🔜 Fase 8: Gravação e Envio de Áudio
+
+**Objetivo:** gravar áudios PTT diretamente no app, sem depender de arquivo externo.
+
+- Captura de áudio via `arecord` ou `ffmpeg -f alsa` como subprocess (pipe stdout → buffer)
+- Encode automático para OGG Opus (padrão WhatsApp): `ffmpeg -i - -c:a libopus`
+- Keybinding push-to-talk: `Ctrl+R` inicia gravação, `Enter` confirma e envia, `Esc` cancela
+- Feedback visual durante gravação: timer + VU meter em ASCII (amplitude do buffer)
+- Arquivo temporário em `data/recordings/` com cleanup após envio
+- Integrar com `SendAudioMessage()` existente (já suporta PTT)
+- Adicionar `WATUI_AUDIO_DEVICE` env para configurar dispositivo de captura
+
+**Verificação:** pressionar Ctrl+R → gravar → Enter → voz enviada como PTT no WhatsApp.
+
+---
+
+### 🔜 Fase 9: Temas e Esquemas de Cores
+
+**Objetivo:** temas nomeados configuráveis e suporte a esquemas de cores customizados.
+
+- Struct `Theme` com todos os tokens de cor (primary, background, surface, text, dim, error, sent, received, group colors…)
+- Temas built-in: `default` (verde WhatsApp), `dark`, `light`, `solarized-dark`, `catppuccin-mocha`, `dracula`
+- Carregar tema via `config.toml` → `[theme] name = "catppuccin-mocha"`
+- Suporte a override por token: `[theme.colors] primary = "#FF6600"`
+- Live reload de tema sem reiniciar (reprocessar estilos lipgloss)
+- Cores de remetentes em grupos geradas dinamicamente a partir do JID (hash → cor da paleta do tema)
+- Exportar paleta atual como arquivo TOML (comando `watui --export-theme`)
+
+**Verificação:** trocar tema no config → reiniciar → UI em novo esquema de cores. Override de cor individual funciona.
+
+---
+
+### 🔜 Fase 10: Multi-tenant (Múltiplas Contas)
+
+**Objetivo:** suporte a múltiplas contas WhatsApp simultâneas (pessoal + business, etc.).
+
+- Cada conta tem seu próprio diretório: `data/accounts/<account-id>/` com `whatsmeow.db` e `watui.db` separados
+- Arquivo de contas: `~/.config/watui/accounts.toml` com lista de contas configuradas
+- Startup: inicializar todos os `whatsapp.Client` em paralelo; cada um tem seu `sendMsg` com prefixo de conta
+- UI: indicador de conta ativa na title bar / status bar
+- Atalho para trocar conta ativa (e.g. `Ctrl+A` abre account switcher overlay)
+- Chat list mostra conversas da conta ativa (ou view unificada com badge de conta)
+- Notificações de mensagens de contas em background (status bar badge)
+- Adicionar `AccountID` em `Conversation` e `Message`; atualizar schema SQLite
+- `WAClient` interface permanece a mesma; `app.Model` gerencia slice de clients
+
+**Verificação:** duas contas logadas → trocar entre elas → conversas e mensagens isoladas por conta.
+
+---
+
+### 🔜 Fase 11: Melhorias e Otimizações
+
+**Objetivo:** qualidade de vida, performance e features avançadas.
+
+#### Search
+- Full-text search de mensagens via SQLite FTS5 (`CREATE VIRTUAL TABLE messages_fts`)
+- Atalho `/` na message view (além do chat list) abre busca global
+- Highlight de termos na mensagem
+
+#### Mensagens Avançadas
+- Quoted messages / respostas: exibir trecho da mensagem citada acima
+- Reações (emoji): exibir agregado de reações abaixo da mensagem
+- Edição de mensagem: atualizar conteúdo no store ao receber `*events.Message` com edit flag
+- Deleção: remover/ocultar mensagem ao receber evento de delete
+
+#### Notificações
+- Integrar `notify-send` / `libnotify` para notificações de desktop
+- Configurável: `[notifications] enabled = true`, `sound = true`
+- Não notificar chats silenciados
+
+#### Performance
+- Virtualização do viewport: renderizar apenas mensagens visíveis (relevante em chats muito longos)
+- Cache de rendered lines para evitar re-renderização desnecessária no `rebuildContent()`
+- Pool de goroutines para history sync paralelo
+
+#### Contatos e Grupos
+- Exibir info do grupo (participantes, subject, foto) em overlay
+- Atualizar nomes de contato via `*events.PushName` (já capturado, mas não aplicado ao store)
+- Avatar de contato/grupo via Kitty graphics protocol
+
+#### QoL
+- Emoji picker básico (categorias + busca) ativado por `:` no input
+- Link preview inline (fetch OG tags em background)
+- Exportar chat como texto/markdown (`watui --export-chat <jid>`)
+- Marcar mensagem como favorita / starred
 
 ---
 
 ### Verificação Final (End-to-End)
 
-1. `make build && ./watui`
-2. QR aparece → escanear → conectado
-3. Lista de chats carrega com conversas reais
-4. Selecionar chat → mensagens aparecem com formatação
-5. Enviar mensagem → entrega confirmada no outro dispositivo
-6. Receber mensagem → aparece em real-time
-7. Tab entre painéis, scroll, resize terminal
-8. Ctrl+C → exit limpo
+1. `make build && ./watui --data-dir ./data`
+2. QR aparece → escanear com WhatsApp → conectado
+3. Lista de chats carrega com conversas reais e nomes resolvidos
+4. Selecionar chat → mensagens mais recentes aparecem no fundo
+5. Enviar mensagem → aparece imediatamente como "◷" → vira "✓" → "✓✓"
+6. Receber mensagem → aparece em real-time; painel lateral atualiza
+7. Ctrl+F → path do arquivo → Enter → envia documento
+8. Ctrl+O → abre zenity → seleciona arquivo → envia
+9. Tab entre painéis, scroll, resize terminal
+10. Desconectar WiFi → status bar mostra "Reconectando..." → reconecta sozinho
+11. Ctrl+C → exit limpo
+
+---
+
+### Notas de Implementação
+
+**LID (`@lid`):** WhatsApp está migrando endereçamento de contatos de `@s.whatsapp.net` para LIDs opacos. A resolução `LID → phone → contact name` é feita via `Store.LIDs.GetPNForLID()`. O mapa inverso é registrado no `GetAllContactNames()`.
+
+**Deduplicação:** mensagens de grupo com `pkmsg` + `skmsg` são despachadas duas vezes pelo whatsmeow. Deduplicadas por `msg.ID` no `handleNewMessage()`.
+
+**IDs de mensagem no cliente:** o ID é gerado localmente via `GenerateMessageID()` e passado como `SendRequestExtra{ID}` para que o placeholder da UI e o eco do servidor usem o mesmo ID.
+
+**QR rendering:** half-blocks (1 módulo/col × 2 módulos/linha) são tentados primeiro. Se o terminal for muito curto, sextant blocks (2×3) reduzem a altura ~40%. O quiet-zone border é preservado (necessário para leitura). Nenhum downsampling é feito (corromperia o QR).

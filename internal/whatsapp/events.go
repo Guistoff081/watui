@@ -12,6 +12,10 @@ import (
 )
 
 func (c *Client) handleEvent(rawEvt interface{}) {
+	if c.dbg != nil {
+		c.dbg.Debug("whatsmeow event", "type", fmt.Sprintf("%T", rawEvt))
+	}
+
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		jid := c.wm.Store.ID
@@ -24,7 +28,11 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 		c.send(theme.DisconnectedMsg{})
 
 	case *events.LoggedOut:
-		c.send(theme.DisconnectedMsg{Err: fmt.Errorf("logged out: %s", evt.Reason)})
+		err := fmt.Errorf("logged out: %s", evt.Reason)
+		if c.dbg != nil {
+			c.dbg.Error(err, "whatsmeow logged out", "reason", evt.Reason)
+		}
+		c.send(theme.DisconnectedMsg{Err: err})
 
 	case *events.QR:
 		if len(evt.Codes) > 0 {
@@ -111,6 +119,9 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 		return
 	}
 
+	// Resolve group subjects once per sync instead of one network call per chat.
+	groupNames := c.GetGroupNames()
+
 	conversations := data.GetConversations()
 	for _, conv := range conversations {
 		jid := conv.GetID()
@@ -123,10 +134,20 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			continue
 		}
 
+		isGroup := parsedJID.Server == types.GroupServer
+		name := conv.GetDisplayName()
+		if name == "" {
+			if isGroup {
+				name = groupNames[jid]
+			} else {
+				name = c.GetContactName(parsedJID)
+			}
+		}
+
 		convModel := theme.Conversation{
 			JID:     jid,
-			Name:    conv.GetDisplayName(),
-			IsGroup: parsedJID.Server == types.GroupServer,
+			Name:    name,
+			IsGroup: isGroup,
 		}
 
 		if conv.GetUnreadCount() > 0 {

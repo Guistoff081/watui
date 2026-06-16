@@ -1,6 +1,7 @@
 package chatview
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -61,8 +62,13 @@ func (m *Model) SetChat(jid string, isGroup bool, messages []theme.Message) {
 	m.atBottom = true
 	m.loading = false
 	m.noMore = false
-	if len(messages) > 0 {
-		m.oldestTS = messages[0].Timestamp
+	// Defensive: guarantee ascending order so the newest messages render at the
+	// bottom and oldestTS (used for lazy-loading) is correct.
+	sort.SliceStable(m.messages, func(i, j int) bool {
+		return m.messages[i].Timestamp.Before(m.messages[j].Timestamp)
+	})
+	if len(m.messages) > 0 {
+		m.oldestTS = m.messages[0].Timestamp
 	} else {
 		m.oldestTS = time.Time{}
 	}

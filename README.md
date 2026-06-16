@@ -68,6 +68,23 @@ Archives are placed in `dist/`.
 
 On first run a QR code appears — scan it with WhatsApp on your phone (Linked Devices → Link a device). Session is saved locally so subsequent runs connect directly.
 
+## Debug logging (development)
+
+Enable file-based debug logging with the `--debug` flag or `WATUI_DEBUG=1`. Logs are written to `<data-dir>/watui-debug.log` (override with `--log-file`).
+
+Run in two terminals:
+
+```bash
+# Terminal 1 — start watui with debug logging
+make run-debug
+# or: WATUI_DEBUG=1 ./watui --data-dir ./data
+
+# Terminal 2 — watch the debug console
+tail -f ./data/watui-debug.log
+```
+
+The log captures Bubble Tea message flow, whatsmeow events at DEBUG level, errors with stack traces, and panics. Message content is not logged — only metadata (chat JID, message ID, etc.).
+
 ## Key Bindings
 
 | Key | Context | Action |
@@ -92,6 +109,7 @@ All data is stored in `./data/` by default (override with `--data-dir`):
 
 - `whatsmeow.db` — WhatsApp session keys (whatsmeow-managed)
 - `watui.db` — Conversations and messages (app-managed)
+- `watui-debug.log` — Debug log (only when `--debug` or `WATUI_DEBUG=1` is set)
 
 ## Stack
 

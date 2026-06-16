@@ -1,6 +1,7 @@
 package input
 
 import (
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -35,12 +36,13 @@ const (
 )
 
 type Model struct {
-	textarea  textarea.Model
-	pathInput textinput.Model
-	mode      inputMode
-	width     int
-	height    int
-	focused   bool
+	textarea        textarea.Model
+	pathInput       textinput.Model
+	mode            inputMode
+	width           int
+	height          int
+	focused         bool
+	pickerAvailable bool
 }
 
 func New() Model {
@@ -63,13 +65,50 @@ func New() Model {
 	pi.CharLimit = 4096
 
 	return Model{
-		textarea:  ta,
-		pathInput: pi,
-		height:    4, // top border (1) + textarea rows (2) + hint row (1)
+		textarea:        ta,
+		pathInput:       pi,
+		height:          4, // top border (1) + textarea rows (2) + hint row (1)
+		pickerAvailable: filePickerAvailable(),
 	}
 }
 
 func (m Model) Init() tea.Cmd { return nil }
+
+// normalizePath cleans a file path the way a shell would, so paths pasted or
+// dragged from a file manager work even when they carry shell quoting/escaping
+// (e.g. "/home/user/'My File.png'" or "/home/user/My\ File.png"). It also expands
+// a leading "~" to the user's home directory.
+func normalizePath(raw string) string {
+	s := strings.TrimSpace(raw)
+
+	var b strings.Builder
+	var quote rune // 0 when unquoted, otherwise the active quote char
+	escaped := false
+	for _, r := range s {
+		switch {
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\' && quote != '\'':
+			// Backslash escapes the next char, except inside single quotes.
+			escaped = true
+		case quote == 0 && (r == '\'' || r == '"'):
+			quote = r
+		case quote != 0 && r == quote:
+			quote = 0
+		default:
+			b.WriteRune(r)
+		}
+	}
+
+	out := b.String()
+	if out == "~" || strings.HasPrefix(out, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			out = home + out[1:]
+		}
+	}
+	return out
+}
 
 func (m *Model) SetSize(w, _ int) {
 	m.width = w
@@ -120,8 +159,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				taCmd := m.textarea.Focus()
 				return m, taCmd
 
+			case "ctrl+o":
+				audio := m.mode == modeAudio
+				m.mode = modeText
+				m.pathInput.Reset()
+				m.pathInput.Blur()
+				taCmd := m.textarea.Focus()
+				return m, tea.Batch(taCmd, pickFileCmd(audio))
+
 			case "enter":
-				path := strings.TrimSpace(m.pathInput.Value())
+				path := normalizePath(m.pathInput.Value())
 				if path == "" {
 					return m, nil
 				}
@@ -151,6 +198,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.textarea.Blur()
 				m.pathInput.Reset()
 				return m, m.pathInput.Focus()
+
+			case "ctrl+o":
+				return m, pickFileCmd(false)
 
 			case "enter":
 				text := strings.TrimSpace(m.textarea.Value())
@@ -187,19 +237,25 @@ func (m Model) View() string {
 	dimStyle := lipgloss.NewStyle().Foreground(theme.ColorTextDim)
 	promptStyle := lipgloss.NewStyle().Foreground(theme.ColorPrimary).Bold(true)
 
+	promptHint := "Enter to send  Esc to cancel"
+	textHint := "ctrl+f attach  ctrl+p audio"
+	if m.pickerAvailable {
+		promptHint += "  ctrl+o browse"
+		textHint += "  ctrl+o browse"
+	}
+
 	var content string
 	switch m.mode {
 	case modeFile:
 		prompt := promptStyle.Render("Attach: ")
 		content = prompt + m.pathInput.View() +
-			"\n\n" + dimStyle.Render("Enter to send  Esc to cancel")
+			"\n\n" + dimStyle.Render(promptHint)
 	case modeAudio:
 		prompt := promptStyle.Render("Audio:  ")
 		content = prompt + m.pathInput.View() +
-			"\n\n" + dimStyle.Render("Enter to send  Esc to cancel")
+			"\n\n" + dimStyle.Render(promptHint)
 	default:
-		hint := dimStyle.Render("ctrl+f attach  ctrl+p audio")
-		content = m.textarea.View() + "\n" + hint
+		content = m.textarea.View() + "\n" + dimStyle.Render(textHint)
 	}
 
 	return style.Width(m.width).Render(content)

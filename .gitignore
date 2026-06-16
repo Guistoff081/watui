@@ -24,3 +24,6 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# Log files
+data/watui-debug.log

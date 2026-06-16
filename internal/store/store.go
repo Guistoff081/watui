@@ -143,13 +143,14 @@ func (s *Store) InsertMessage(ctx context.Context, msg theme.Message) error {
 	return err
 }
 
-// GetMessages returns messages for a chat, ordered by timestamp ascending.
+// GetMessages returns the most recent messages for a chat (up to limit),
+// ordered by timestamp ascending (oldest first) for display.
 func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]theme.Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
 		FROM messages
 		WHERE chat_jid = ?
-		ORDER BY timestamp ASC
+		ORDER BY timestamp DESC
 		LIMIT ?
 	`, chatJID, limit)
 	if err != nil {
@@ -167,7 +168,15 @@ func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]t
 		msg.Timestamp = time.Unix(ts, 0)
 		msgs = append(msgs, msg)
 	}
-	return msgs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Reverse the DESC result to get oldest-first order for rendering.
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
 }
 
 // UpdateMessageStatus updates the status of a message by ID.

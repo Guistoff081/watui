@@ -11,10 +11,14 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/rs/zerolog"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/watui/watui/internal/debug"
 	"github.com/watui/watui/internal/theme"
 	"go.mau.fi/whatsmeow"
+	waCompanionReg "go.mau.fi/whatsmeow/proto/waCompanionReg"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -27,9 +31,10 @@ type Client struct {
 	sendMsg func(tea.Msg)
 	mu      sync.Mutex
 	log     waLog.Logger
+	dbg     *debug.Logger
 }
 
-func NewClient(dbPath string) (*Client, error) {
+func NewClient(dbPath string, dbg *debug.Logger) (*Client, error) {
 	container, err := sqlstore.New(
 		context.Background(),
 		"sqlite3",
@@ -45,13 +50,30 @@ func NewClient(dbPath string) (*Client, error) {
 		return nil, fmt.Errorf("get device: %w", err)
 	}
 
-	log := waLog.Stdout("whatsapp", "WARN", true)
+	// Identify the linked device. These props are sent during pairing, so an
+	// already-paired session keeps its old "(unknown)" name until it is re-linked.
+	store.DeviceProps.Os = proto.String("watui")
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
+
+	var log waLog.Logger
+	if dbg != nil {
+		zl := zerolog.New(dbg.Writer()).
+			With().
+			Timestamp().
+			Str("module", "whatsapp").
+			Logger().
+			Level(zerolog.DebugLevel)
+		log = waLog.Zerolog(zl)
+	} else {
+		log = waLog.Stdout("whatsapp", "WARN", true)
+	}
 	wm := whatsmeow.NewClient(deviceStore, log)
 
 	c := &Client{
 		wm:    wm,
 		store: container,
 		log:   log,
+		dbg:   dbg,
 	}
 
 	wm.AddEventHandler(c.handleEvent)
@@ -92,12 +114,31 @@ func (c *Client) Connect() tea.Cmd {
 				case "code":
 					c.send(theme.QRCodeMsg{Code: evt.Code})
 				case "timeout":
+					if c.dbg != nil {
+						c.dbg.Warn("QR code session timed out")
+					}
 					c.send(theme.QRTimeoutMsg{})
 				case "success":
 					// Login event will be handled by the event handler
 					return nil
 				case "error":
-					return theme.LoginFailedMsg{Err: fmt.Errorf("QR login failed")}
+					err := evt.Error
+					if err == nil {
+						err = fmt.Errorf("QR login failed")
+					}
+					if c.dbg != nil {
+						c.dbg.Error(err, "QR login error")
+					}
+					return theme.LoginFailedMsg{Err: err}
+				default:
+					err := fmt.Errorf("QR pairing failed: %s", evt.Event)
+					if evt.Error != nil {
+						err = fmt.Errorf("QR pairing failed: %s: %w", evt.Event, evt.Error)
+					}
+					if c.dbg != nil {
+						c.dbg.Error(err, "QR channel terminal event")
+					}
+					return theme.LoginFailedMsg{Err: err}
 				}
 			}
 			return nil
@@ -119,16 +160,23 @@ func (c *Client) Disconnect() {
 	}
 }
 
-// SendTextMessage sends a text message to the given JID.
-func (c *Client) SendTextMessage(jid types.JID, text string) tea.Cmd {
+// GenerateMessageID returns a new client-side message ID. Generating it up front
+// lets the UI use the same ID for its optimistic placeholder and the actual send,
+// so status updates (and the server's own echo) line up.
+func (c *Client) GenerateMessageID() string {
+	return string(c.wm.GenerateMessageID())
+}
+
+// SendTextMessage sends a text message to the given JID using the provided ID.
+func (c *Client) SendTextMessage(jid types.JID, id, text string) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := c.wm.SendMessage(context.Background(), jid, &waE2E.Message{
 			Conversation: proto.String(text),
-		})
+		}, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
 			return theme.MessageSendFailedMsg{
 				ChatJID:   jid,
-				MessageID: "",
+				MessageID: id,
 				Err:       err,
 			}
 		}
@@ -143,21 +191,21 @@ func (c *Client) SendTextMessage(jid types.JID, text string) tea.Cmd {
 const maxUploadSize = 64 << 20 // 64 MB
 
 // SendFileMessage reads path from disk, uploads it to WhatsApp, and sends it as a document.
-func (c *Client) SendFileMessage(jid types.JID, path string) tea.Cmd {
+func (c *Client) SendFileMessage(jid types.JID, id, path string) tea.Cmd {
 	return func() tea.Msg {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("read file: %w", err)}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
 		}
 		if len(data) > maxUploadSize {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("file too large (max 64 MB)")}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
 		}
 
 		mimeType := detectMIME(path, data)
 
 		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaDocument)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("upload: %w", err)}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
 		}
 
 		msg := &waE2E.Message{
@@ -173,9 +221,9 @@ func (c *Client) SendFileMessage(jid types.JID, path string) tea.Cmd {
 			},
 		}
 
-		resp, err := c.wm.SendMessage(context.Background(), jid, msg)
+		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: err}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: err}
 		}
 		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
 	}
@@ -183,21 +231,21 @@ func (c *Client) SendFileMessage(jid types.JID, path string) tea.Cmd {
 
 // SendAudioMessage reads path from disk, uploads it, and sends it as a PTT voice message.
 // The file should be OGG Opus for best compatibility with WhatsApp clients.
-func (c *Client) SendAudioMessage(jid types.JID, path string) tea.Cmd {
+func (c *Client) SendAudioMessage(jid types.JID, id, path string) tea.Cmd {
 	return func() tea.Msg {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("read file: %w", err)}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
 		}
 		if len(data) > maxUploadSize {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("file too large (max 64 MB)")}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
 		}
 
 		mimeType := detectMIME(path, data)
 
 		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaAudio)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: fmt.Errorf("upload: %w", err)}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
 		}
 
 		msg := &waE2E.Message{
@@ -213,9 +261,9 @@ func (c *Client) SendAudioMessage(jid types.JID, path string) tea.Cmd {
 			},
 		}
 
-		resp, err := c.wm.SendMessage(context.Background(), jid, msg)
+		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, Err: err}
+			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: err}
 		}
 		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
 	}
@@ -261,38 +309,54 @@ func (c *Client) SendChatPresence(jid types.JID, composing bool) {
 	}
 }
 
-// GetContactName returns the best available name for a JID from whatsmeow's contact store.
+// GetContactName returns the best available name for a JID from whatsmeow's
+// contact store. Contacts are keyed by phone-number JID, so LID (@lid) JIDs are
+// first mapped back to their phone number before lookup.
 func (c *Client) GetContactName(jid types.JID) string {
-	contact, err := c.wm.Store.Contacts.GetContact(context.Background(), jid)
+	ctx := context.Background()
+	lookup := jid
+	if jid.Server == types.HiddenUserServer {
+		if pn, err := c.wm.Store.LIDs.GetPNForLID(ctx, jid); err == nil && pn.User != "" {
+			lookup = pn
+		}
+	}
+	contact, err := c.wm.Store.Contacts.GetContact(ctx, lookup)
 	if err != nil || !contact.Found {
 		return ""
 	}
-	if contact.FullName != "" {
-		return contact.FullName
+	return bestContactName(contact.FullName, contact.PushName, contact.BusinessName)
+}
+
+func bestContactName(full, push, business string) string {
+	if full != "" {
+		return full
 	}
-	if contact.PushName != "" {
-		return contact.PushName
+	if push != "" {
+		return push
 	}
-	return contact.BusinessName
+	return business
 }
 
 // GetAllContactNames returns a map of JID string -> best name for all contacts.
+// Each name is registered under both the phone-number JID and (when known) the
+// matching LID JID, since WhatsApp increasingly addresses chats by LID.
 func (c *Client) GetAllContactNames() map[string]string {
-	contacts, err := c.wm.Store.Contacts.GetAllContacts(context.Background())
+	ctx := context.Background()
+	contacts, err := c.wm.Store.Contacts.GetAllContacts(ctx)
 	if err != nil {
 		return nil
 	}
 	names := make(map[string]string, len(contacts))
 	for jid, contact := range contacts {
-		name := contact.FullName
+		name := bestContactName(contact.FullName, contact.PushName, contact.BusinessName)
 		if name == "" {
-			name = contact.PushName
+			continue
 		}
-		if name == "" {
-			name = contact.BusinessName
-		}
-		if name != "" {
-			names[jid.String()] = name
+		names[jid.String()] = name
+		if jid.Server == types.DefaultUserServer {
+			if lid, err := c.wm.Store.LIDs.GetLIDForPN(ctx, jid); err == nil && lid.User != "" {
+				names[lid.String()] = name
+			}
 		}
 	}
 	return names

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"go.mau.fi/whatsmeow/types"
 
+	"github.com/watui/watui/internal/debug"
 	"github.com/watui/watui/internal/store"
 	"github.com/watui/watui/internal/theme"
 	"github.com/watui/watui/internal/ui/auth"
@@ -40,9 +42,10 @@ const (
 type WAClient interface {
 	Connect() tea.Cmd
 	Disconnect()
-	SendTextMessage(jid types.JID, text string) tea.Cmd
-	SendFileMessage(jid types.JID, path string) tea.Cmd
-	SendAudioMessage(jid types.JID, path string) tea.Cmd
+	GenerateMessageID() string
+	SendTextMessage(jid types.JID, id, text string) tea.Cmd
+	SendFileMessage(jid types.JID, id, path string) tea.Cmd
+	SendAudioMessage(jid types.JID, id, path string) tea.Cmd
 	SendChatPresence(jid types.JID, composing bool)
 	MarkRead(chatJID types.JID, sender types.JID, messageIDs []string)
 	GetAllContactNames() map[string]string
@@ -91,13 +94,16 @@ type Model struct {
 
 	// Reconnect backoff
 	reconnectAttempts int
+
+	log *debug.Logger
 }
 
-func NewModel(wa WAClient, s *store.Store, version string) Model {
+func NewModel(wa WAClient, s *store.Store, version string, log *debug.Logger) Model {
 	return Model{
 		state:         StateAuth,
 		wa:            wa,
 		store:         s,
+		log:           log,
 		focus:         PanelChatList,
 		auth:          auth.New(),
 		chatList:      chatlist.New(),
@@ -117,6 +123,10 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	if m.log != nil {
+		m.log.LogMsg(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -135,11 +145,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Auth ---
 	case theme.QRCodeMsg:
 		m.state = StateAuth
+		m.auth.SetDimensions(m.width, m.height)
 		m.auth.SetQRCode(msg.Code)
 
 	case theme.QRTimeoutMsg:
 		m.state = StateAuth
+		m.auth.SetDimensions(m.width, m.height)
 		m.auth.SetQRTimeout()
+		if m.log != nil {
+			m.log.Info("QR code expired, requesting new codes")
+		}
+		cmds = append(cmds, m.wa.Connect())
 
 	case theme.LoginSuccessMsg:
 		m.connectedJID = msg.JID.String()
@@ -159,6 +175,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case theme.LoginFailedMsg:
 		m.state = StateError
 		m.lastErr = msg.Err
+		if m.log != nil && msg.Err != nil {
+			m.log.Error(msg.Err, "login failed")
+		}
 
 	case theme.DisconnectedMsg:
 		m.statusBar.SetDisconnected()
@@ -174,6 +193,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastErr = msg.Err
 			} else {
 				m.lastErr = fmt.Errorf("disconnected from WhatsApp")
+			}
+			if m.log != nil {
+				m.log.Error(m.lastErr, "disconnected")
 			}
 		}
 
@@ -207,15 +229,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case theme.MessagesLoadedMsg:
 		jid := msg.ChatJID.String()
-		m.chatMessages[jid] = msg.Messages
+		// Merge (don't overwrite): history-sync batches can arrive after live
+		// messages, and must not discard them. Dedupe by ID and keep ascending order.
+		merged := mergeMessages(m.chatMessages[jid], msg.Messages)
+		m.chatMessages[jid] = merged
 		_ = m.store.InsertMessages(context.Background(), msg.Messages)
 		if m.chatView.ChatJID() == jid {
 			conv := m.conversations[jid]
-			m.chatView.SetChat(jid, conv.IsGroup, msg.Messages)
+			m.chatView.SetChat(jid, conv.IsGroup, merged)
 		}
 
 	case theme.HistorySyncCompleteMsg:
 		m.statusBar.ClearMessage()
+		// Contacts and groups are populated by now; re-resolve any names that are
+		// still showing as raw JIDs (e.g. LID-addressed chats synced after connect).
+		cmds = append(cmds, m.loadContactNamesCmd())
 
 	// --- Lazy-load older messages ---
 	case chatview.LoadOlderMsg:
@@ -240,21 +268,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleNewMessage(msg.Message)
 
 	case theme.MessageSentMsg:
-		m.chatView.UpdateMessageStatus(msg.MessageID, "sent")
+		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "sent")
 
 	case theme.MessageSendFailedMsg:
-		m.chatView.UpdateMessageStatus(msg.MessageID, "failed")
+		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "failed")
 		errText := "Send failed"
 		if msg.Err != nil {
 			errText = "Send failed: " + msg.Err.Error()
+			if m.log != nil {
+				m.log.Error(msg.Err, "message send failed", "chat", msg.ChatJID.String(), "id", msg.MessageID)
+			}
 		}
 		m.statusBar.SetMessage(errText)
 		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
 
 	case theme.MessageStatusMsg:
-		if m.chatView.ChatJID() == msg.ChatJID.String() {
-			m.chatView.UpdateMessageStatus(msg.MessageID, msg.Status)
-		}
+		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, msg.Status)
 
 	// --- Typing indicators ---
 	case theme.TypingMsg:
@@ -284,10 +313,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSendFile(msg.Path)
 	case input.SendAudioMsg:
 		return m.handleSendAudio(msg.Path)
+	case input.PickerErrorMsg:
+		m.statusBar.SetMessage(msg.Err)
+		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
 
 	case error:
 		m.state = StateError
 		m.lastErr = msg
+		if m.log != nil {
+			m.log.Error(msg, "unhandled error")
+		}
 	}
 
 	if m.state == StateAuth {
@@ -469,6 +504,17 @@ func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message)
 
 func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 	jid := msg.ChatJID
+
+	// WhatsApp can deliver the same message more than once — e.g. a group stanza
+	// that carries both a sender-key distribution (pkmsg) and the content (skmsg)
+	// is decrypted and dispatched twice. Drop duplicates by ID so they don't
+	// appear twice or double-count as unread.
+	for _, existing := range m.chatMessages[jid] {
+		if existing.ID == msg.ID {
+			return *m, nil
+		}
+	}
+
 	m.chatMessages[jid] = append(m.chatMessages[jid], msg)
 	_ = m.store.InsertMessage(context.Background(), msg)
 
@@ -489,6 +535,50 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 	return *m, nil
 }
 
+// setMessageStatus updates a message's status in the in-memory cache, the open
+// chat view, and the persistent store, keyed by message ID.
+func (m *Model) setMessageStatus(chatJID, msgID, status string) {
+	if msgID == "" {
+		return
+	}
+	msgs := m.chatMessages[chatJID]
+	for i := range msgs {
+		if msgs[i].ID == msgID {
+			msgs[i].Status = status
+			break
+		}
+	}
+	if m.chatView.ChatJID() == chatJID {
+		m.chatView.UpdateMessageStatus(msgID, status)
+	}
+	_ = m.store.UpdateMessageStatus(context.Background(), msgID, status)
+}
+
+// addOutgoingMessage records an optimistic outgoing message in the cache, view,
+// store, and conversation preview, returning the message with its generated ID.
+func (m *Model) addOutgoingMessage(chatJID, id, content string) theme.Message {
+	msg := theme.Message{
+		ID:        id,
+		ChatJID:   chatJID,
+		Content:   content,
+		Timestamp: time.Now(),
+		IsFromMe:  true,
+		Status:    "sending",
+	}
+	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
+	m.chatView.AppendMessage(msg)
+	_ = m.store.InsertMessage(context.Background(), msg)
+
+	if conv, ok := m.conversations[chatJID]; ok {
+		conv.LastMessage = content
+		conv.LastMsgTime = msg.Timestamp
+		m.conversations[chatJID] = conv
+		m.chatList.UpsertConversation(conv)
+		_ = m.store.UpsertConversation(context.Background(), conv)
+	}
+	return msg
+}
+
 func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 	chatJID := m.chatView.ChatJID()
 	if chatJID == "" {
@@ -499,24 +589,8 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	msg := theme.Message{
-		ID:        fmt.Sprintf("sending-%d", len(m.chatMessages[chatJID])),
-		ChatJID:   chatJID,
-		Content:   text,
-		Timestamp: time.Now(),
-		IsFromMe:  true,
-		Status:    "sending",
-	}
-	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
-	m.chatView.AppendMessage(msg)
-
-	if conv, ok := m.conversations[chatJID]; ok {
-		conv.LastMessage = text
-		conv.LastMsgTime = msg.Timestamp
-		m.conversations[chatJID] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
-	}
+	id := m.wa.GenerateMessageID()
+	m.addOutgoingMessage(chatJID, id, text)
 
 	var cmds []tea.Cmd
 	if m.isTyping {
@@ -524,7 +598,7 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 		m.typingGen++
 		cmds = append(cmds, m.sendTypingPresenceCmd(false))
 	}
-	cmds = append(cmds, m.wa.SendTextMessage(jid, text))
+	cmds = append(cmds, m.wa.SendTextMessage(jid, id, text))
 	return *m, tea.Batch(cmds...)
 }
 
@@ -538,25 +612,9 @@ func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
+	id := m.wa.GenerateMessageID()
 	label := fmt.Sprintf("[file] %s", filepath.Base(path))
-	msg := theme.Message{
-		ID:        fmt.Sprintf("sending-%d", time.Now().UnixNano()),
-		ChatJID:   chatJID,
-		Content:   label,
-		Timestamp: time.Now(),
-		IsFromMe:  true,
-		Status:    "sending",
-	}
-	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
-	m.chatView.AppendMessage(msg)
-
-	if conv, ok := m.conversations[chatJID]; ok {
-		conv.LastMessage = label
-		conv.LastMsgTime = msg.Timestamp
-		m.conversations[chatJID] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
-	}
+	m.addOutgoingMessage(chatJID, id, label)
 
 	var cmds []tea.Cmd
 	if m.isTyping {
@@ -564,7 +622,7 @@ func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
 		m.typingGen++
 		cmds = append(cmds, m.sendTypingPresenceCmd(false))
 	}
-	cmds = append(cmds, m.wa.SendFileMessage(jid, path))
+	cmds = append(cmds, m.wa.SendFileMessage(jid, id, path))
 	return *m, tea.Batch(cmds...)
 }
 
@@ -578,25 +636,9 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
+	id := m.wa.GenerateMessageID()
 	label := fmt.Sprintf("[voice] %s", filepath.Base(path))
-	msg := theme.Message{
-		ID:        fmt.Sprintf("sending-%d", time.Now().UnixNano()),
-		ChatJID:   chatJID,
-		Content:   label,
-		Timestamp: time.Now(),
-		IsFromMe:  true,
-		Status:    "sending",
-	}
-	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
-	m.chatView.AppendMessage(msg)
-
-	if conv, ok := m.conversations[chatJID]; ok {
-		conv.LastMessage = label
-		conv.LastMsgTime = msg.Timestamp
-		m.conversations[chatJID] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
-	}
+	m.addOutgoingMessage(chatJID, id, label)
 
 	var cmds []tea.Cmd
 	if m.isTyping {
@@ -604,11 +646,34 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 		m.typingGen++
 		cmds = append(cmds, m.sendTypingPresenceCmd(false))
 	}
-	cmds = append(cmds, m.wa.SendAudioMessage(jid, path))
+	cmds = append(cmds, m.wa.SendAudioMessage(jid, id, path))
 	return *m, tea.Batch(cmds...)
 }
 
 // --- Commands ---
+
+// mergeMessages combines message lists into a single slice, de-duplicating by ID
+// (earlier lists win, so cached/live state isn't clobbered by history) and sorting
+// ascending by timestamp for display.
+func mergeMessages(lists ...[]theme.Message) []theme.Message {
+	seen := make(map[string]struct{})
+	var out []theme.Message
+	for _, list := range lists {
+		for _, msg := range list {
+			if msg.ID != "" {
+				if _, ok := seen[msg.ID]; ok {
+					continue
+				}
+				seen[msg.ID] = struct{}{}
+			}
+			out = append(out, msg)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Timestamp.Before(out[j].Timestamp)
+	})
+	return out
+}
 
 func (m Model) loadConversationsCmd() tea.Cmd {
 	return func() tea.Msg {
