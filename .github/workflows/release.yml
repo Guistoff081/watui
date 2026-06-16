@@ -26,19 +26,22 @@ jobs:
             apt_packages: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
 
-          - os: macos-13
-            goos: darwin
-            goarch: amd64
-
           - os: macos-latest
             goos: darwin
             goarch: arm64
 
+          # Cross-compile darwin/amd64 from the arm64 runner (macOS SDK ships both arches)
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            cgo_cflags: "-arch x86_64"
+            cgo_ldflags: "-arch x86_64"
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -53,6 +56,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
           CC: ${{ matrix.cc }}
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
@@ -73,7 +78,7 @@ jobs:
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: watui-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/watui-*.tar.gz
@@ -84,7 +89,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true
@@ -96,7 +101,7 @@ jobs:
           cat checksums.txt
 
       - name: Upload checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: checksums
           path: dist/checksums.txt
@@ -106,16 +111,16 @@ jobs:
     needs: checksums
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/watui-*.tar.gz
