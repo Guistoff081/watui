@@ -32,6 +32,10 @@ type DisconnectedMsg struct {
 
 type ReconnectingMsg struct{}
 
+// ClientOutdatedMsg is emitted when WhatsApp rejects the connection because the
+// whatsmeow client version is too old (failure reason 405).
+type ClientOutdatedMsg struct{}
+
 // Chat messages
 type ConversationListMsg struct {
 	Conversations []Conversation

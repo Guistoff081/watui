@@ -34,6 +34,12 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 		}
 		c.send(theme.DisconnectedMsg{Err: err})
 
+	case *events.ClientOutdated:
+		if c.dbg != nil {
+			c.dbg.Error(fmt.Errorf("client outdated (405)"), "whatsmeow client version rejected by WhatsApp")
+		}
+		c.send(theme.ClientOutdatedMsg{})
+
 	case *events.QR:
 		if len(evt.Codes) > 0 {
 			c.send(theme.QRCodeMsg{Code: evt.Codes[0]})

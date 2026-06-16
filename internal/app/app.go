@@ -179,6 +179,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.log.Error(msg.Err, "login failed")
 		}
 
+	case theme.ClientOutdatedMsg:
+		m.state = StateError
+		m.lastErr = fmt.Errorf(
+			"WhatsApp rejected the connection: client version outdated (405).\n\n" +
+				"Update the WhatsApp library and rebuild:\n" +
+				"  go get -u go.mau.fi/whatsmeow@latest && go mod tidy",
+		)
+		if m.log != nil {
+			m.log.Error(m.lastErr, "client outdated")
+		}
+
 	case theme.DisconnectedMsg:
 		m.statusBar.SetDisconnected()
 		if m.state == StateChat && msg.Err == nil && m.reconnectAttempts < 5 {
