@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -146,6 +147,9 @@ func (c *Client) Connect() tea.Cmd {
 
 		// Already logged in
 		err := c.wm.Connect()
+		if errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			return nil
+		}
 		if err != nil {
 			return theme.LoginFailedMsg{Err: err}
 		}

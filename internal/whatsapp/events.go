@@ -55,8 +55,13 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 		c.handleReceipt(evt)
 
 	case *events.ChatPresence:
+		alt := evt.MessageSource.SenderAlt
+		if evt.MessageSource.IsFromMe {
+			alt = evt.MessageSource.RecipientAlt
+		}
+		chatJID := c.canonicalChatJID(evt.MessageSource.Chat, alt)
 		c.send(theme.TypingMsg{
-			ChatJID:  evt.MessageSource.Chat,
+			ChatJID:  chatJID,
 			Sender:   evt.MessageSource.Sender,
 			IsTyping: evt.State == types.ChatPresenceComposing,
 		})
@@ -81,10 +86,13 @@ func (c *Client) handleMessage(evt *events.Message) {
 		senderName = evt.Info.PushName
 	}
 
+	chatJID := c.canonicalChatFromInfo(evt.Info)
+	senderJID := c.canonicalSenderFromInfo(evt.Info)
+
 	msg := theme.Message{
 		ID:         evt.Info.ID,
-		ChatJID:    evt.Info.Chat.String(),
-		SenderJID:  evt.Info.Sender.String(),
+		ChatJID:    chatJID.String(),
+		SenderJID:  senderJID.String(),
 		SenderName: senderName,
 		Content:    content,
 		Timestamp:  evt.Info.Timestamp,
@@ -110,12 +118,14 @@ func (c *Client) handleReceipt(evt *events.Receipt) {
 		return
 	}
 
+	chatJID := c.canonicalChatJID(evt.Chat, types.EmptyJID)
+
 	for _, msgID := range evt.MessageIDs {
 		if msgID == "" {
 			continue
 		}
 		c.send(theme.MessageStatusMsg{
-			ChatJID:   evt.Chat,
+			ChatJID:   chatJID,
 			MessageID: string(msgID),
 			Status:    status,
 		})
@@ -143,18 +153,21 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			continue
 		}
 
-		isGroup := parsedJID.Server == types.GroupServer
+		canonical := c.canonicalChatJID(parsedJID, types.EmptyJID)
+		canonicalStr := canonical.String()
+
+		isGroup := canonical.Server == types.GroupServer
 		name := conv.GetDisplayName()
 		if name == "" {
 			if isGroup {
-				name = groupNames[jid]
+				name = groupNames[canonicalStr]
 			} else {
-				name = c.GetContactName(parsedJID)
+				name = c.GetContactName(canonical)
 			}
 		}
 
 		convModel := theme.Conversation{
-			JID:     jid,
+			JID:     canonicalStr,
 			Name:    name,
 			IsGroup: isGroup,
 		}
@@ -187,7 +200,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 			msg := theme.Message{
 				ID:        msgInfo.GetID(),
-				ChatJID:   jid,
+				ChatJID:   canonicalStr,
 				SenderJID: msgInfo.GetParticipant(),
 				Content:   content,
 				Timestamp: ts,
@@ -198,7 +211,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			if msg.IsFromMe {
 				msg.Status = "read"
 				if msg.SenderJID == "" {
-					msg.SenderJID = jid
+					msg.SenderJID = canonicalStr
 				}
 			}
 
@@ -215,7 +228,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 		if len(messages) > 0 {
 			c.send(theme.MessagesLoadedMsg{
-				ChatJID:  parsedJID,
+				ChatJID:  canonical,
 				Messages: messages,
 			})
 		}

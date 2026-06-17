@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -141,6 +142,58 @@ func (s *Store) InsertMessage(ctx context.Context, msg theme.Message) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, msg.ID, msg.ChatJID, msg.SenderJID, msg.SenderName, msg.Content, msg.Timestamp.Unix(), msg.IsFromMe, msg.Status)
 	return err
+}
+
+// GetMessagesForChats returns the most recent messages across one or more chat JID
+// aliases (e.g. phone number and LID for the same 1:1 chat), oldest-first.
+func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limit int) ([]theme.Message, error) {
+	if len(chatJIDs) == 0 {
+		return nil, nil
+	}
+	if len(chatJIDs) == 1 {
+		return s.GetMessages(ctx, chatJIDs[0], limit)
+	}
+
+	placeholders := make([]string, len(chatJIDs))
+	args := make([]any, 0, len(chatJIDs)+1)
+	for i, jid := range chatJIDs {
+		placeholders[i] = "?"
+		args = append(args, jid)
+	}
+	args = append(args, limit)
+
+	query := fmt.Sprintf(`
+		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
+		FROM messages
+		WHERE chat_jid IN (%s)
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []theme.Message
+	for rows.Next() {
+		var msg theme.Message
+		var ts int64
+		if err := rows.Scan(&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName, &msg.Content, &ts, &msg.IsFromMe, &msg.Status); err != nil {
+			return nil, err
+		}
+		msg.Timestamp = time.Unix(ts, 0)
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
 }
 
 // GetMessages returns the most recent messages for a chat (up to limit),

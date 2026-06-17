@@ -26,6 +26,7 @@ func (fakeWA) SendChatPresence(types.JID, bool)                  {}
 func (fakeWA) MarkRead(types.JID, types.JID, []string)           {}
 func (fakeWA) GetAllContactNames() map[string]string            { return nil }
 func (fakeWA) GetGroupNames() map[string]string                 { return nil }
+func (fakeWA) AltChatJID(jid string) string                     { return "" }
 
 func newTestModel(t *testing.T) (Model, *store.Store) {
 	t.Helper()

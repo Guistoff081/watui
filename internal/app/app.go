@@ -50,6 +50,7 @@ type WAClient interface {
 	MarkRead(chatJID types.JID, sender types.JID, messageIDs []string)
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
+	AltChatJID(jid string) string
 }
 
 // --- private message types ---
@@ -234,17 +235,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case theme.ConversationUpdatedMsg:
-		m.conversations[msg.Conversation.JID] = msg.Conversation
-		m.chatList.UpsertConversation(msg.Conversation)
-		_ = m.store.UpsertConversation(context.Background(), msg.Conversation)
+		jid := msg.Conversation.JID
+		updated := msg.Conversation
+		if existing, ok := m.conversations[jid]; ok {
+			// History sync may send a conversation update whose Last* is computed
+			// only from the (limited) messages in that sync payload. Do not regress
+			// the preview we have from live messages or prior state.
+			if !updated.LastMsgTime.After(existing.LastMsgTime) {
+				updated.LastMessage = existing.LastMessage
+				updated.LastMsgTime = existing.LastMsgTime
+			}
+		}
+		m.conversations[jid] = updated
+		m.chatList.UpsertConversation(updated)
+		_ = m.store.UpsertConversation(context.Background(), updated)
 
 	case theme.MessagesLoadedMsg:
-		jid := msg.ChatJID.String()
+		jid := m.resolveConversationJID(msg.ChatJID.String())
+		m.mergeAliasChatCache(jid)
 		// Merge (don't overwrite): history-sync batches can arrive after live
 		// messages, and must not discard them. Dedupe by ID and keep ascending order.
 		merged := mergeMessages(m.chatMessages[jid], msg.Messages)
 		m.chatMessages[jid] = merged
 		_ = m.store.InsertMessages(context.Background(), msg.Messages)
+		// If the loaded history batch contains a message newer than our current
+		// preview, advance the conversation last so list/preview is up to date.
+		if len(msg.Messages) > 0 {
+			latest := msg.Messages[0]
+			for _, m := range msg.Messages {
+				if m.Timestamp.After(latest.Timestamp) {
+					latest = m
+				}
+			}
+			if conv, ok := m.conversations[jid]; ok && latest.Timestamp.After(conv.LastMsgTime) {
+				conv.LastMessage = latest.Content
+				conv.LastMsgTime = latest.Timestamp
+				m.conversations[jid] = conv
+				m.chatList.UpsertConversation(conv)
+				_ = m.store.UpsertConversation(context.Background(), conv)
+			}
+		}
 		if m.chatView.ChatJID() == jid {
 			conv := m.conversations[jid]
 			m.chatView.SetChat(jid, conv.IsGroup, merged)
@@ -463,10 +493,24 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	// Always merge the persisted recent history with whatever is cached in memory
 	// (live + offline-sync messages), deduped and time-ordered. Relying on the
 	// cache alone could show only a handful of offline-synced messages.
-	stored, _ := m.store.GetMessages(context.Background(), jid, 200)
+	stored, _ := m.store.GetMessagesForChats(context.Background(), m.chatJIDAliases(jid), 200)
+	m.mergeAliasChatCache(jid)
 	messages := mergeMessages(m.chatMessages[jid], stored)
 	m.chatMessages[jid] = messages
 	m.chatView.SetChat(jid, conv.IsGroup, messages)
+
+	// Ensure the conversation preview reflects the actual newest message we just
+	// loaded (defensive against any stale data from history sync etc).
+	if len(messages) > 0 {
+		last := messages[len(messages)-1]
+		if last.Timestamp.After(conv.LastMsgTime) {
+			conv.LastMessage = last.Content
+			conv.LastMsgTime = last.Timestamp
+			m.conversations[jid] = conv
+			m.chatList.UpsertConversation(conv)
+			_ = m.store.UpsertConversation(context.Background(), conv)
+		}
+	}
 
 	m.chatList.ClearUnread(jid)
 	_ = m.store.ClearUnread(context.Background(), jid)
@@ -513,7 +557,9 @@ func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message)
 // --- Message handlers ---
 
 func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
-	jid := msg.ChatJID
+	jid := m.resolveConversationJID(msg.ChatJID)
+	msg.ChatJID = jid
+	m.mergeAliasChatCache(jid)
 
 	// WhatsApp can deliver the same message more than once — e.g. a group stanza
 	// that carries both a sender-key distribution (pkmsg) and the content (skmsg)
@@ -528,13 +574,29 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 	m.chatMessages[jid] = insertMessageSorted(m.chatMessages[jid], msg)
 	_ = m.store.InsertMessage(context.Background(), msg)
 
-	if conv, ok := m.conversations[jid]; ok {
+	conv, ok := m.conversations[jid]
+	if !ok {
+		name := msg.SenderName
+		if name == "" {
+			name = jid
+		}
+		conv = theme.Conversation{
+			JID:     jid,
+			Name:    name,
+			IsGroup: strings.HasSuffix(jid, "@g.us"),
+		}
+		m.conversations[jid] = conv
+		m.chatList.UpsertConversation(conv)
+		_ = m.store.UpsertConversation(context.Background(), conv)
+		ok = true
+	}
+	if ok {
 		// Don't let an older (offline-replayed) message overwrite a newer preview.
 		if msg.Timestamp.After(conv.LastMsgTime) {
 			conv.LastMessage = msg.Content
 			conv.LastMsgTime = msg.Timestamp
 		}
-		if m.chatView.ChatJID() != jid {
+		if m.resolveConversationJID(m.chatView.ChatJID()) != jid {
 			conv.UnreadCount++
 		}
 		m.conversations[jid] = conv
@@ -542,7 +604,7 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 		_ = m.store.UpsertConversation(context.Background(), conv)
 	}
 
-	if m.chatView.ChatJID() == jid {
+	if m.resolveConversationJID(m.chatView.ChatJID()) == jid {
 		m.chatView.AppendMessage(msg)
 	}
 	return *m, nil
@@ -554,6 +616,9 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 	if msgID == "" {
 		return
 	}
+	chatJID = m.resolveConversationJID(chatJID)
+	m.mergeAliasChatCache(chatJID)
+
 	msgs := m.chatMessages[chatJID]
 	for i := range msgs {
 		if msgs[i].ID == msgID {
@@ -561,7 +626,10 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 			break
 		}
 	}
-	if m.chatView.ChatJID() == chatJID {
+	m.chatMessages[chatJID] = msgs
+
+	viewJID := m.resolveConversationJID(m.chatView.ChatJID())
+	if viewJID == chatJID {
 		m.chatView.UpdateMessageStatus(msgID, status)
 	}
 	_ = m.store.UpdateMessageStatus(context.Background(), msgID, status)
@@ -664,6 +732,48 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 }
 
 // --- Commands ---
+
+// resolveConversationJID maps an incoming chat JID to the key used in m.conversations,
+// trying the LID↔PN alternate when the direct key is missing.
+func (m *Model) resolveConversationJID(jid string) string {
+	if jid == "" {
+		return jid
+	}
+	if _, ok := m.conversations[jid]; ok {
+		return jid
+	}
+	if alt := m.wa.AltChatJID(jid); alt != "" {
+		if _, ok := m.conversations[alt]; ok {
+			return alt
+		}
+	}
+	return jid
+}
+
+// chatJIDAliases returns jid and its LID↔PN alternate (if known) for cache/store lookups.
+func (m *Model) chatJIDAliases(jid string) []string {
+	if jid == "" {
+		return nil
+	}
+	aliases := []string{jid}
+	if alt := m.wa.AltChatJID(jid); alt != "" && alt != jid {
+		aliases = append(aliases, alt)
+	}
+	return aliases
+}
+
+// mergeAliasChatCache folds messages cached under an alternate JID into the canonical key.
+func (m *Model) mergeAliasChatCache(canonical string) {
+	for _, alias := range m.chatJIDAliases(canonical) {
+		if alias == canonical {
+			continue
+		}
+		if msgs, ok := m.chatMessages[alias]; ok {
+			m.chatMessages[canonical] = mergeMessages(m.chatMessages[canonical], msgs)
+			delete(m.chatMessages, alias)
+		}
+	}
+}
 
 // mergeMessages combines message lists into a single slice, de-duplicating by ID
 // (earlier lists win, so cached/live state isn't clobbered by history) and sorting
