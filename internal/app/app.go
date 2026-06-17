@@ -460,13 +460,12 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 
 	m.titleBar.SetChat(conv.Name, conv.JID, conv.IsGroup)
 
-	messages := m.chatMessages[jid]
-	if len(messages) == 0 {
-		if stored, err := m.store.GetMessages(context.Background(), jid, 200); err == nil && len(stored) > 0 {
-			messages = stored
-			m.chatMessages[jid] = messages
-		}
-	}
+	// Always merge the persisted recent history with whatever is cached in memory
+	// (live + offline-sync messages), deduped and time-ordered. Relying on the
+	// cache alone could show only a handful of offline-synced messages.
+	stored, _ := m.store.GetMessages(context.Background(), jid, 200)
+	messages := mergeMessages(m.chatMessages[jid], stored)
+	m.chatMessages[jid] = messages
 	m.chatView.SetChat(jid, conv.IsGroup, messages)
 
 	m.chatList.ClearUnread(jid)
@@ -526,12 +525,15 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 		}
 	}
 
-	m.chatMessages[jid] = append(m.chatMessages[jid], msg)
+	m.chatMessages[jid] = insertMessageSorted(m.chatMessages[jid], msg)
 	_ = m.store.InsertMessage(context.Background(), msg)
 
 	if conv, ok := m.conversations[jid]; ok {
-		conv.LastMessage = msg.Content
-		conv.LastMsgTime = msg.Timestamp
+		// Don't let an older (offline-replayed) message overwrite a newer preview.
+		if msg.Timestamp.After(conv.LastMsgTime) {
+			conv.LastMessage = msg.Content
+			conv.LastMsgTime = msg.Timestamp
+		}
 		if m.chatView.ChatJID() != jid {
 			conv.UnreadCount++
 		}
@@ -684,6 +686,18 @@ func mergeMessages(lists ...[]theme.Message) []theme.Message {
 		return out[i].Timestamp.Before(out[j].Timestamp)
 	})
 	return out
+}
+
+// insertMessageSorted inserts msg into a time-ascending slice at the correct
+// position, so offline-replayed messages with older timestamps land in order.
+func insertMessageSorted(msgs []theme.Message, msg theme.Message) []theme.Message {
+	idx := sort.Search(len(msgs), func(i int) bool {
+		return msgs[i].Timestamp.After(msg.Timestamp)
+	})
+	msgs = append(msgs, theme.Message{})
+	copy(msgs[idx+1:], msgs[idx:])
+	msgs[idx] = msg
+	return msgs
 }
 
 func (m Model) loadConversationsCmd() tea.Cmd {

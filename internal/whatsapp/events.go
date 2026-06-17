@@ -111,6 +111,9 @@ func (c *Client) handleReceipt(evt *events.Receipt) {
 	}
 
 	for _, msgID := range evt.MessageIDs {
+		if msgID == "" {
+			continue
+		}
 		c.send(theme.MessageStatusMsg{
 			ChatJID:   evt.Chat,
 			MessageID: string(msgID),

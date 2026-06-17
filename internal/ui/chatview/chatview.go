@@ -80,10 +80,25 @@ func (m *Model) AppendMessage(msg theme.Message) {
 	if msg.ChatJID != m.chatJID {
 		return
 	}
-	m.messages = append(m.messages, msg)
 	wasAtBottom := m.atBottom
+
+	// Live messages are usually the newest, but offline-sync replay can deliver
+	// messages with older timestamps; insert those in order instead of at the bottom.
+	isNewest := len(m.messages) == 0 ||
+		!msg.Timestamp.Before(m.messages[len(m.messages)-1].Timestamp)
+	if isNewest {
+		m.messages = append(m.messages, msg)
+	} else {
+		idx := sort.Search(len(m.messages), func(i int) bool {
+			return m.messages[i].Timestamp.After(msg.Timestamp)
+		})
+		m.messages = append(m.messages, theme.Message{})
+		copy(m.messages[idx+1:], m.messages[idx:])
+		m.messages[idx] = msg
+	}
+
 	m.rebuildContent()
-	if wasAtBottom {
+	if wasAtBottom && isNewest {
 		m.viewport.GotoBottom()
 	}
 }
