@@ -2,6 +2,8 @@ package whatsapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime"
@@ -408,7 +410,14 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 		}
 
 		ext := extFromMime(msg.MimeType)
-		cachePath := filepath.Join(c.mediaDir, msg.ID+ext)
+		cachePath, err := mediaCachePath(c.mediaDir, msg.ID, ext)
+		if err != nil {
+			return theme.MediaDownloadFailedMsg{
+				ChatJID:   msg.ChatJID,
+				MessageID: msg.ID,
+				Err:       fmt.Errorf("unsafe message ID: %w", err),
+			}
+		}
 
 		// Already cached — return immediately without a network call.
 		if _, err := os.Stat(cachePath); err == nil {
@@ -437,7 +446,8 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 			}
 		}
 
-		if err := os.WriteFile(cachePath, data, 0o644); err != nil {
+		// 0o600: media files are user-private (may contain personal content).
+		if err := os.WriteFile(cachePath, data, 0o600); err != nil {
 			return theme.MediaDownloadFailedMsg{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
@@ -463,13 +473,15 @@ func (c *Client) OpenMedia(path, mediaType string) tea.Cmd {
 		case "audio", "voice":
 			for _, player := range []string{"mpv", "ffplay", "aplay"} {
 				if _, err := exec.LookPath(player); err == nil {
-					cmd = exec.Command(player, path)
+					// "--" terminates option parsing so a path starting with "-"
+					// is never mistaken for a flag.
+					cmd = exec.Command(player, "--", path)
 					break
 				}
 			}
 		}
 		if cmd == nil {
-			cmd = exec.Command("xdg-open", path)
+			cmd = exec.Command("xdg-open", "--", path)
 		}
 		// Detach from our process group so the player survives if we exit.
 		_ = cmd.Start()
@@ -503,6 +515,33 @@ func mmsType(mt string) string {
 	default:
 		return "image"
 	}
+}
+
+// mediaCachePath returns an absolute path inside mediaDir for a message ID + extension.
+// The message ID is sanitized to prevent path traversal: only alphanumeric characters,
+// hyphens, and underscores are kept. If the sanitized result is empty, the SHA-256 hex
+// of the raw ID is used. The final path is verified to lie within mediaDir.
+func mediaCachePath(mediaDir, msgID, ext string) (string, error) {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return -1
+	}, msgID)
+	if safe == "" {
+		h := sha256.Sum256([]byte(msgID))
+		safe = hex.EncodeToString(h[:])
+	}
+
+	p := filepath.Join(mediaDir, safe+ext)
+
+	// Guard: verify the resolved path is still inside mediaDir.
+	cleanDir := filepath.Clean(mediaDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(p)+string(os.PathSeparator), cleanDir) {
+		return "", fmt.Errorf("path %q escapes media directory", p)
+	}
+	return p, nil
 }
 
 // extFromMime returns a file extension (with leading dot) for a MIME type.

@@ -29,7 +29,7 @@ func main() {
 	}
 
 	mediaDir := filepath.Join(*dataDir, "media")
-	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
 		fatalf("create media cache directory: %v", err)
 	}
 
