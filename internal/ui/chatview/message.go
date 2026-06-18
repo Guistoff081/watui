@@ -10,19 +10,21 @@ import (
 	"github.com/watui/watui/internal/theme"
 )
 
-func renderMessage(msg theme.Message, width int, isGroup bool) string {
+// renderMessage renders a single message bubble. isSelected adds a highlight
+// border when the chatview selection cursor is on this message. thumbCache is
+// consulted (and populated) for expensive thumbnail renders.
+func renderMessage(msg theme.Message, width int, isGroup bool, isSelected bool, thumbCache map[string]string) string {
 	maxBubbleW := int(float64(width) * 0.7)
 	if maxBubbleW < 20 {
 		maxBubbleW = 20
 	}
 
-	content := msg.Content
 	timeStr := msg.Timestamp.Format("15:04")
 	statusIcon := statusToIcon(msg.Status)
 
-	// Build the bubble content
 	var bubbleContent strings.Builder
 
+	// Group sender name
 	if isGroup && !msg.IsFromMe && msg.SenderName != "" {
 		senderColor := getSenderColor(msg.SenderJID)
 		senderStyle := lipgloss.NewStyle().Foreground(senderColor).Bold(true)
@@ -30,14 +32,19 @@ func renderMessage(msg theme.Message, width int, isGroup bool) string {
 		bubbleContent.WriteString("\n")
 	}
 
-	bubbleContent.WriteString(content)
+	// Media or text body
+	if msg.MediaType != "" {
+		bubbleContent.WriteString(renderMediaBody(msg, maxBubbleW, thumbCache))
+		bubbleContent.WriteString("\n")
+	} else {
+		bubbleContent.WriteString(msg.Content)
+	}
 
-	// Time + status on the same line, right-aligned
+	// Timestamp + status
 	meta := theme.TimestampStyle.Render(timeStr)
 	if msg.IsFromMe {
 		meta += " " + statusIcon
 	}
-
 	bubbleContent.WriteString("  ")
 	bubbleContent.WriteString(meta)
 
@@ -48,13 +55,133 @@ func renderMessage(msg theme.Message, width int, isGroup bool) string {
 		style = theme.OtherMessageStyle.MaxWidth(maxBubbleW)
 	}
 
+	if isSelected {
+		style = style.BorderLeft(true).
+			BorderStyle(lipgloss.ThickBorder()).
+			BorderForeground(theme.ColorPrimary)
+	}
+
 	bubble := style.Render(bubbleContent.String())
 
-	// Align: right for own messages, left for others
 	if msg.IsFromMe {
 		return lipgloss.NewStyle().Width(width).Align(lipgloss.Right).Render(bubble)
 	}
 	return bubble
+}
+
+// renderMediaBody returns the inline representation of a media message body.
+func renderMediaBody(msg theme.Message, maxW int, thumbCache map[string]string) string {
+	switch msg.MediaType {
+	case "image", "video", "gif", "sticker":
+		return renderImageBody(msg, maxW, thumbCache)
+	case "audio", "voice":
+		return renderAudioBody(msg)
+	case "document":
+		return renderDocumentBody(msg)
+	default:
+		return "[media]"
+	}
+}
+
+func renderImageBody(msg theme.Message, maxW int, thumbCache map[string]string) string {
+	var b strings.Builder
+
+	// Thumbnail: prefer embedded thumbnail (images/videos) over downloaded file (stickers).
+	thumbData := msg.Thumbnail
+	if len(thumbData) == 0 && msg.MediaPath != "" {
+		thumbData = nil // will be loaded inside thumbnailToHalfBlock via MediaPath
+	}
+
+	// thumbCols: fit within bubble, cap at 40 for readability
+	thumbCols := maxW - 4
+	if thumbCols > 40 {
+		thumbCols = 40
+	}
+	if thumbCols < 8 {
+		thumbCols = 8
+	}
+
+	var rendered string
+	if len(thumbData) > 0 {
+		rendered = cachedThumbnail(msg.ID, thumbData, msg.MimeType, thumbCols, thumbCache)
+	} else if msg.MediaPath != "" {
+		rendered = cachedThumbnailFromPath(msg.ID, msg.MediaPath, msg.MimeType, thumbCols, thumbCache)
+	}
+
+	if rendered != "" {
+		b.WriteString(rendered)
+		b.WriteString("\n")
+	}
+
+	// Type tag + dimensions
+	tag := mediaTag(msg)
+	if msg.Width > 0 && msg.Height > 0 {
+		tag += fmt.Sprintf(" %d×%d", msg.Width, msg.Height)
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(theme.ColorTextDim).Render(tag))
+
+	if msg.Content != "" {
+		b.WriteString("\n")
+		b.WriteString(msg.Content)
+	}
+
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(theme.ColorTextDim).Render("↵ open"))
+
+	return b.String()
+}
+
+func renderAudioBody(msg theme.Message) string {
+	var b strings.Builder
+	icon := "🎵"
+	if msg.MediaType == "voice" {
+		icon = "🎤"
+	}
+	dur := formatDuration(msg.Duration)
+	b.WriteString(fmt.Sprintf("%s  %s", icon, dur))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(theme.ColorTextDim).Render("↵ play"))
+	return b.String()
+}
+
+func renderDocumentBody(msg theme.Message) string {
+	var b strings.Builder
+	name := msg.FileName
+	if name == "" {
+		name = "file"
+	}
+	b.WriteString("📄  " + name)
+	if msg.Content != "" {
+		b.WriteString("\n")
+		b.WriteString(msg.Content)
+	}
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(theme.ColorTextDim).Render("↵ open"))
+	return b.String()
+}
+
+func mediaTag(msg theme.Message) string {
+	switch msg.MediaType {
+	case "image":
+		return "[image]"
+	case "video":
+		return "[video]"
+	case "gif":
+		return "[GIF]"
+	case "sticker":
+		if msg.IsAnimated {
+			return "[animated sticker]"
+		}
+		return "[sticker]"
+	}
+	return "[media]"
+}
+
+func formatDuration(secs int) string {
+	if secs <= 0 {
+		return "0:00"
+	}
+	return fmt.Sprintf("%d:%02d", secs/60, secs%60)
 }
 
 func renderDateSeparator(t time.Time, width int) string {

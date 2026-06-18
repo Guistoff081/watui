@@ -28,6 +28,11 @@ func main() {
 		fatalf("create data directory: %v", err)
 	}
 
+	mediaDir := filepath.Join(*dataDir, "media")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		fatalf("create media cache directory: %v", err)
+	}
+
 	debugEnabled := *debugFlag || os.Getenv("WATUI_DEBUG") == "1"
 
 	var logger *debug.Logger
@@ -57,7 +62,7 @@ func main() {
 	waDBPath := filepath.Join(*dataDir, "whatsmeow.db")
 	appDBPath := filepath.Join(*dataDir, "watui.db")
 
-	waClient, err := whatsapp.NewClient(waDBPath, logger)
+	waClient, err := whatsapp.NewClient(waDBPath, mediaDir, logger)
 	if err != nil {
 		if logger != nil {
 			logger.Error(err, "init WhatsApp client")

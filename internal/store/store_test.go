@@ -213,6 +213,71 @@ func TestClearUnread(t *testing.T) {
 	}
 }
 
+func TestInsertMessageRoundTripsMediaColumns(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	jid := "123@s.whatsapp.net"
+	seedConversation(t, s, jid)
+
+	msg := theme.Message{
+		ID:            "med1",
+		ChatJID:       jid,
+		Timestamp:     time.Unix(500, 0),
+		MediaType:     "image",
+		MimeType:      "image/jpeg",
+		Width:         1280,
+		Height:        720,
+		Thumbnail:     []byte{0xFF, 0xD8, 0xFF}, // fake JPEG header
+		DirectPath:    "/v/path",
+		MediaKey:      []byte{0x01, 0x02},
+		FileSHA256:    []byte{0xAB},
+		FileEncSHA256: []byte{0xCD},
+	}
+	if err := s.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage() error = %v", err)
+	}
+
+	got, err := s.GetMessages(ctx, jid, 1)
+	if err != nil {
+		t.Fatalf("GetMessages() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	g := got[0]
+	if g.MediaType != "image" {
+		t.Errorf("MediaType = %q, want image", g.MediaType)
+	}
+	if g.Width != 1280 || g.Height != 720 {
+		t.Errorf("dimensions = %d×%d, want 1280×720", g.Width, g.Height)
+	}
+	if string(g.Thumbnail) != string(msg.Thumbnail) {
+		t.Errorf("Thumbnail mismatch")
+	}
+	if string(g.MediaKey) != string(msg.MediaKey) {
+		t.Errorf("MediaKey mismatch")
+	}
+}
+
+func TestUpdateMessageMediaPath(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	jid := "123@s.whatsapp.net"
+	seedConversation(t, s, jid)
+
+	msg := theme.Message{ID: "m1", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(1, 0)}
+	if err := s.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage() error = %v", err)
+	}
+	if err := s.UpdateMessageMediaPath(ctx, jid, "m1", "/cache/m1.jpg"); err != nil {
+		t.Fatalf("UpdateMessageMediaPath() error = %v", err)
+	}
+	got, _ := s.GetMessages(ctx, jid, 1)
+	if len(got) != 1 || got[0].MediaPath != "/cache/m1.jpg" {
+		t.Errorf("MediaPath = %q, want /cache/m1.jpg", got[0].MediaPath)
+	}
+}
+
 func TestGetAllConversationsOrdersPinnedThenRecent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

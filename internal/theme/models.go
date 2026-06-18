@@ -112,8 +112,66 @@ type Message struct {
 	ChatJID    string
 	SenderJID  string
 	SenderName string
-	Content    string
-	Timestamp  time.Time
-	IsFromMe   bool
-	Status     string // sending/sent/delivered/read/received/failed
+	// Content holds the bare caption for media messages, or the full text for text messages.
+	// Use PreviewText() to get a human-readable preview for the conversation list.
+	Content   string
+	Timestamp time.Time
+	IsFromMe  bool
+	Status    string // sending/sent/delivered/read/received/failed
+
+	// Media fields (zero values mean plain-text message)
+	MediaType     string // "image"|"video"|"audio"|"voice"|"document"|"sticker"|"gif"
+	MediaPath     string // local cache path once full-res is downloaded (empty until then)
+	MimeType      string
+	FileName      string // for document messages
+	Thumbnail     []byte // embedded JPEG thumbnail (images/videos); ready immediately, no network
+	Width, Height int
+	Duration      int  // seconds (audio/video)
+	IsAnimated    bool // animated sticker or GIF
+
+	// Download metadata — needed to call DownloadMediaWithPath after a restart
+	DirectPath    string
+	MediaKey      []byte
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+}
+
+// PreviewText returns a human-readable one-liner for the conversation list.
+// For media messages it prepends the type tag; for text messages it returns Content as-is.
+func (m Message) PreviewText() string {
+	if m.MediaType == "" {
+		return m.Content
+	}
+	icons := map[string]string{
+		"image":    "[image]",
+		"video":    "[video]",
+		"audio":    "[audio]",
+		"voice":    "[voice message]",
+		"document": "[file]",
+		"sticker":  "[sticker]",
+		"gif":      "[GIF]",
+	}
+	tag := icons[m.MediaType]
+	if tag == "" {
+		tag = "[media]"
+	}
+	if m.Content != "" {
+		return tag + " " + m.Content
+	}
+	return tag
+}
+
+// MediaDownloadedMsg is emitted when a media file has been successfully downloaded
+// and saved to the local cache.
+type MediaDownloadedMsg struct {
+	ChatJID   string
+	MessageID string
+	Path      string
+}
+
+// MediaDownloadFailedMsg is emitted when a media download fails.
+type MediaDownloadFailedMsg struct {
+	ChatJID   string
+	MessageID string
+	Err       error
 }

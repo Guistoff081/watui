@@ -114,8 +114,12 @@ func (s *Store) InsertMessages(ctx context.Context, messages []theme.Message) er
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO messages (id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR IGNORE INTO messages (
+			id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
+			media_type, media_path, mime_type, file_name, thumbnail,
+			media_width, media_height, duration, is_animated,
+			direct_path, media_key, file_sha256, file_enc_sha256
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -126,6 +130,9 @@ func (s *Store) InsertMessages(ctx context.Context, messages []theme.Message) er
 		_, err := stmt.ExecContext(ctx,
 			msg.ID, msg.ChatJID, msg.SenderJID, msg.SenderName,
 			msg.Content, msg.Timestamp.Unix(), msg.IsFromMe, msg.Status,
+			msg.MediaType, msg.MediaPath, msg.MimeType, msg.FileName, blobOrNil(msg.Thumbnail),
+			msg.Width, msg.Height, msg.Duration, msg.IsAnimated,
+			msg.DirectPath, blobOrNil(msg.MediaKey), blobOrNil(msg.FileSHA256), blobOrNil(msg.FileEncSHA256),
 		)
 		if err != nil {
 			return err
@@ -138,10 +145,36 @@ func (s *Store) InsertMessages(ctx context.Context, messages []theme.Message) er
 // InsertMessage inserts a single message, ignoring if it already exists.
 func (s *Store) InsertMessage(ctx context.Context, msg theme.Message) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO messages (id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, msg.ID, msg.ChatJID, msg.SenderJID, msg.SenderName, msg.Content, msg.Timestamp.Unix(), msg.IsFromMe, msg.Status)
+		INSERT OR IGNORE INTO messages (
+			id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
+			media_type, media_path, mime_type, file_name, thumbnail,
+			media_width, media_height, duration, is_animated,
+			direct_path, media_key, file_sha256, file_enc_sha256
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		msg.ID, msg.ChatJID, msg.SenderJID, msg.SenderName,
+		msg.Content, msg.Timestamp.Unix(), msg.IsFromMe, msg.Status,
+		msg.MediaType, msg.MediaPath, msg.MimeType, msg.FileName, blobOrNil(msg.Thumbnail),
+		msg.Width, msg.Height, msg.Duration, msg.IsAnimated,
+		msg.DirectPath, blobOrNil(msg.MediaKey), blobOrNil(msg.FileSHA256), blobOrNil(msg.FileEncSHA256),
+	)
 	return err
+}
+
+// UpdateMessageMediaPath persists the local cache path for a downloaded media file.
+func (s *Store) UpdateMessageMediaPath(ctx context.Context, chatJID, msgID, path string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE messages SET media_path = ? WHERE id = ? AND chat_jid = ?
+	`, path, msgID, chatJID)
+	return err
+}
+
+// blobOrNil returns nil for empty byte slices so SQLite stores NULL instead of an empty BLOB.
+func blobOrNil(b []byte) interface{} {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 // GetMessagesForChats returns the most recent messages across one or more chat JID
@@ -163,7 +196,10 @@ func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limi
 	args = append(args, limit)
 
 	query := fmt.Sprintf(`
-		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
+		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
+		       media_type, media_path, mime_type, file_name, thumbnail,
+		       media_width, media_height, duration, is_animated,
+		       direct_path, media_key, file_sha256, file_enc_sha256
 		FROM messages
 		WHERE chat_jid IN (%s)
 		ORDER BY timestamp DESC
@@ -178,12 +214,10 @@ func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limi
 
 	var msgs []theme.Message
 	for rows.Next() {
-		var msg theme.Message
-		var ts int64
-		if err := rows.Scan(&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName, &msg.Content, &ts, &msg.IsFromMe, &msg.Status); err != nil {
+		msg, err := scanMessage(rows)
+		if err != nil {
 			return nil, err
 		}
-		msg.Timestamp = time.Unix(ts, 0)
 		msgs = append(msgs, msg)
 	}
 	if err := rows.Err(); err != nil {
@@ -200,7 +234,10 @@ func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limi
 // ordered by timestamp ascending (oldest first) for display.
 func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]theme.Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
+		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
+		       media_type, media_path, mime_type, file_name, thumbnail,
+		       media_width, media_height, duration, is_animated,
+		       direct_path, media_key, file_sha256, file_enc_sha256
 		FROM messages
 		WHERE chat_jid = ?
 		ORDER BY timestamp DESC
@@ -213,12 +250,10 @@ func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]t
 
 	var msgs []theme.Message
 	for rows.Next() {
-		var msg theme.Message
-		var ts int64
-		if err := rows.Scan(&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName, &msg.Content, &ts, &msg.IsFromMe, &msg.Status); err != nil {
+		msg, err := scanMessage(rows)
+		if err != nil {
 			return nil, err
 		}
-		msg.Timestamp = time.Unix(ts, 0)
 		msgs = append(msgs, msg)
 	}
 	if err := rows.Err(); err != nil {
@@ -240,11 +275,37 @@ func (s *Store) UpdateMessageStatus(ctx context.Context, msgID, status string) e
 	return err
 }
 
+// rowScanner is satisfied by both *sql.Rows and *sql.Row.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanMessage scans a full message row (all 21 columns) into a theme.Message.
+func scanMessage(row rowScanner) (theme.Message, error) {
+	var msg theme.Message
+	var ts int64
+	err := row.Scan(
+		&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName,
+		&msg.Content, &ts, &msg.IsFromMe, &msg.Status,
+		&msg.MediaType, &msg.MediaPath, &msg.MimeType, &msg.FileName, &msg.Thumbnail,
+		&msg.Width, &msg.Height, &msg.Duration, &msg.IsAnimated,
+		&msg.DirectPath, &msg.MediaKey, &msg.FileSHA256, &msg.FileEncSHA256,
+	)
+	if err != nil {
+		return theme.Message{}, err
+	}
+	msg.Timestamp = time.Unix(ts, 0)
+	return msg, nil
+}
+
 // GetMessagesBefore returns up to limit messages for chatJID with timestamps
 // strictly before before, ordered oldest-first (for prepending to a loaded history).
 func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before time.Time, limit int) ([]theme.Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status
+		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
+		       media_type, media_path, mime_type, file_name, thumbnail,
+		       media_width, media_height, duration, is_animated,
+		       direct_path, media_key, file_sha256, file_enc_sha256
 		FROM messages
 		WHERE chat_jid = ? AND timestamp < ?
 		ORDER BY timestamp DESC
@@ -257,13 +318,10 @@ func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before ti
 
 	var msgs []theme.Message
 	for rows.Next() {
-		var msg theme.Message
-		var ts int64
-		if err := rows.Scan(&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName,
-			&msg.Content, &ts, &msg.IsFromMe, &msg.Status); err != nil {
+		msg, err := scanMessage(rows)
+		if err != nil {
 			return nil, err
 		}
-		msg.Timestamp = time.Unix(ts, 0)
 		msgs = append(msgs, msg)
 	}
 	if err := rows.Err(); err != nil {

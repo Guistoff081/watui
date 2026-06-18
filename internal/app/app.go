@@ -51,6 +51,8 @@ type WAClient interface {
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
 	AltChatJID(jid string) string
+	DownloadMedia(msg theme.Message) tea.Cmd
+	OpenMedia(path, mediaType string) tea.Cmd
 }
 
 // --- private message types ---
@@ -95,6 +97,11 @@ type Model struct {
 
 	// Reconnect backoff
 	reconnectAttempts int
+
+	// pendingOpenMsgID holds a message ID that the user asked to open/play but
+	// whose media was not yet downloaded. When the matching MediaDownloadedMsg
+	// arrives, OpenMedia is dispatched automatically.
+	pendingOpenMsgID string
 
 	log *debug.Logger
 }
@@ -326,6 +333,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case theme.MessageStatusMsg:
 		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, msg.Status)
 
+	// --- Media ---
+	case theme.MediaDownloadedMsg:
+		cmds = append(cmds, m.handleMediaDownloaded(msg))
+
+	case theme.MediaDownloadFailedMsg:
+		if m.log != nil && msg.Err != nil {
+			m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
+		}
+
+	case chatview.MediaOpenMsg:
+		cmds = append(cmds, m.handleMediaOpen(msg.ChatJID, msg.MessageID))
+
 	// --- Typing indicators ---
 	case theme.TypingMsg:
 		if m.chatView.ChatJID() == msg.ChatJID.String() {
@@ -518,8 +537,21 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	// Send read receipts to WhatsApp for received messages.
 	m.markChatRead(jid, conv.IsGroup, messages)
 
+	// Auto-download sticker files for the visible window (stickers have no embedded
+	// thumbnail, so they need the full file before a half-block preview can render).
+	const stickerAutoDownloadCap = 10
+	var stickerCmds []tea.Cmd
+	for _, msg := range messages {
+		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
+			stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
+			if len(stickerCmds) >= stickerAutoDownloadCap {
+				break
+			}
+		}
+	}
+
 	focusCmd := m.setFocus(PanelMessages)
-	return *m, focusCmd
+	return *m, tea.Batch(append(stickerCmds, focusCmd)...)
 }
 
 func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message) {
@@ -633,6 +665,59 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 		m.chatView.UpdateMessageStatus(msgID, status)
 	}
 	_ = m.store.UpdateMessageStatus(context.Background(), msgID, status)
+}
+
+// handleMediaDownloaded updates the in-memory cache and store with the downloaded
+// path, invalidates the chatview thumbnail cache, and opens the media if this
+// download was triggered by a pending user open/play request.
+func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
+	jid := m.resolveConversationJID(msg.ChatJID)
+	msgs := m.chatMessages[jid]
+	for i := range msgs {
+		if msgs[i].ID == msg.MessageID {
+			msgs[i].MediaPath = msg.Path
+			break
+		}
+	}
+	m.chatMessages[jid] = msgs
+
+	_ = m.store.UpdateMessageMediaPath(context.Background(), jid, msg.MessageID, msg.Path)
+
+	m.chatView.InvalidateThumbnail(msg.MessageID)
+	if m.chatView.ChatJID() == jid {
+		conv := m.conversations[jid]
+		m.chatView.SetChat(jid, conv.IsGroup, msgs)
+	}
+
+	if m.pendingOpenMsgID == msg.MessageID {
+		m.pendingOpenMsgID = ""
+		for _, cached := range msgs {
+			if cached.ID == msg.MessageID {
+				return m.wa.OpenMedia(msg.Path, cached.MediaType)
+			}
+		}
+	}
+	return nil
+}
+
+// handleMediaOpen opens or downloads-then-opens the media for the selected message.
+func (m *Model) handleMediaOpen(chatJID, msgID string) tea.Cmd {
+	jid := m.resolveConversationJID(chatJID)
+	for _, msg := range m.chatMessages[jid] {
+		if msg.ID != msgID {
+			continue
+		}
+		if msg.MediaType == "" {
+			return nil
+		}
+		if msg.MediaPath != "" {
+			return m.wa.OpenMedia(msg.MediaPath, msg.MediaType)
+		}
+		// Not yet downloaded — start download; open on completion.
+		m.pendingOpenMsgID = msgID
+		return m.wa.DownloadMedia(msg)
+	}
+	return nil
 }
 
 // addOutgoingMessage records an optimistic outgoing message in the cache, view,

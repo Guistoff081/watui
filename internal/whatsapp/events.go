@@ -76,8 +76,12 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 
 func (c *Client) handleMessage(evt *events.Message) {
 	content := extractTextContent(evt.Message)
-	if content == "" {
-		// For now, skip non-text messages
+	meta := extractMedia(evt.Message)
+
+	if meta.mediaType != "" {
+		// For media messages, Content holds the bare caption (may be "").
+		content = meta.caption
+	} else if content == "" {
 		content = "[media]"
 	}
 
@@ -98,6 +102,19 @@ func (c *Client) handleMessage(evt *events.Message) {
 		Timestamp:  evt.Info.Timestamp,
 		IsFromMe:   evt.Info.IsFromMe,
 		Status:     "received",
+
+		MediaType:     meta.mediaType,
+		MimeType:      meta.mimeType,
+		FileName:      meta.fileName,
+		Thumbnail:     meta.thumbnail,
+		Width:         meta.width,
+		Height:        meta.height,
+		Duration:      meta.duration,
+		IsAnimated:    meta.isAnimated,
+		DirectPath:    meta.directPath,
+		MediaKey:      meta.mediaKey,
+		FileSHA256:    meta.fileSHA256,
+		FileEncSHA256: meta.fileEncSHA256,
 	}
 
 	if evt.Info.IsFromMe {
@@ -191,9 +208,16 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			}
 
 			msgInfo := wmi.GetKey()
-			content := extractTextContent(wmi.Message)
-			if content == "" {
-				content = "[media]"
+			meta := extractMedia(wmi.Message)
+
+			var content string
+			if meta.mediaType != "" {
+				content = meta.caption
+			} else {
+				content = extractTextContent(wmi.Message)
+				if content == "" {
+					content = "[media]"
+				}
 			}
 
 			ts := time.Unix(int64(wmi.GetMessageTimestamp()), 0)
@@ -206,6 +230,19 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 				Timestamp: ts,
 				IsFromMe:  msgInfo.GetFromMe(),
 				Status:    "received",
+
+				MediaType:     meta.mediaType,
+				MimeType:      meta.mimeType,
+				FileName:      meta.fileName,
+				Thumbnail:     meta.thumbnail,
+				Width:         meta.width,
+				Height:        meta.height,
+				Duration:      meta.duration,
+				IsAnimated:    meta.isAnimated,
+				DirectPath:    meta.directPath,
+				MediaKey:      meta.mediaKey,
+				FileSHA256:    meta.fileSHA256,
+				FileEncSHA256: meta.fileEncSHA256,
 			}
 
 			if msg.IsFromMe {
@@ -217,14 +254,19 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 			messages = append(messages, msg)
 
+			preview := msg.PreviewText()
 			if ts.After(lastTime) {
 				lastTime = ts
-				lastMsg = content
+				lastMsg = preview
 			}
 		}
 
 		convModel.LastMessage = lastMsg
 		convModel.LastMsgTime = lastTime
+
+		// ConversationUpdatedMsg must arrive before MessagesLoadedMsg so that
+		// _foreign_keys=on does not silently drop history rows for new conversations.
+		c.send(theme.ConversationUpdatedMsg{Conversation: convModel})
 
 		if len(messages) > 0 {
 			c.send(theme.MessagesLoadedMsg{
@@ -232,11 +274,109 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 				Messages: messages,
 			})
 		}
-
-		c.send(theme.ConversationUpdatedMsg{Conversation: convModel})
 	}
 
 	c.send(theme.HistorySyncCompleteMsg{})
+}
+
+type mediaMeta struct {
+	mediaType     string
+	directPath    string
+	mediaKey      []byte
+	fileSHA256    []byte
+	fileEncSHA256 []byte
+	mimeType      string
+	thumbnail     []byte
+	width         int
+	height        int
+	duration      int
+	isAnimated    bool
+	fileName      string
+	caption       string
+}
+
+// extractMedia returns download metadata and display hints for media messages.
+// Returns a zero mediaMeta (mediaType == "") for plain-text messages.
+func extractMedia(msg *waProto.Message) mediaMeta {
+	if msg == nil {
+		return mediaMeta{}
+	}
+	if img := msg.ImageMessage; img != nil {
+		return mediaMeta{
+			mediaType:     "image",
+			directPath:    img.GetDirectPath(),
+			mediaKey:      img.GetMediaKey(),
+			fileSHA256:    img.GetFileSHA256(),
+			fileEncSHA256: img.GetFileEncSHA256(),
+			mimeType:      img.GetMimetype(),
+			thumbnail:     img.GetJPEGThumbnail(),
+			width:         int(img.GetWidth()),
+			height:        int(img.GetHeight()),
+			caption:       img.GetCaption(),
+		}
+	}
+	if vid := msg.VideoMessage; vid != nil {
+		mt := "video"
+		if vid.GetGifPlayback() {
+			mt = "gif"
+		}
+		return mediaMeta{
+			mediaType:     mt,
+			directPath:    vid.GetDirectPath(),
+			mediaKey:      vid.GetMediaKey(),
+			fileSHA256:    vid.GetFileSHA256(),
+			fileEncSHA256: vid.GetFileEncSHA256(),
+			mimeType:      vid.GetMimetype(),
+			thumbnail:     vid.GetJPEGThumbnail(),
+			width:         int(vid.GetWidth()),
+			height:        int(vid.GetHeight()),
+			duration:      int(vid.GetSeconds()),
+			isAnimated:    vid.GetGifPlayback(),
+			caption:       vid.GetCaption(),
+		}
+	}
+	if aud := msg.AudioMessage; aud != nil {
+		mt := "audio"
+		if aud.GetPTT() {
+			mt = "voice"
+		}
+		return mediaMeta{
+			mediaType:     mt,
+			directPath:    aud.GetDirectPath(),
+			mediaKey:      aud.GetMediaKey(),
+			fileSHA256:    aud.GetFileSHA256(),
+			fileEncSHA256: aud.GetFileEncSHA256(),
+			mimeType:      aud.GetMimetype(),
+			duration:      int(aud.GetSeconds()),
+		}
+	}
+	if doc := msg.DocumentMessage; doc != nil {
+		return mediaMeta{
+			mediaType:     "document",
+			directPath:    doc.GetDirectPath(),
+			mediaKey:      doc.GetMediaKey(),
+			fileSHA256:    doc.GetFileSHA256(),
+			fileEncSHA256: doc.GetFileEncSHA256(),
+			mimeType:      doc.GetMimetype(),
+			thumbnail:     doc.GetJPEGThumbnail(),
+			fileName:      doc.GetFileName(),
+			caption:       doc.GetCaption(),
+		}
+	}
+	if stk := msg.StickerMessage; stk != nil {
+		return mediaMeta{
+			mediaType:     "sticker",
+			directPath:    stk.GetDirectPath(),
+			mediaKey:      stk.GetMediaKey(),
+			fileSHA256:    stk.GetFileSHA256(),
+			fileEncSHA256: stk.GetFileEncSHA256(),
+			mimeType:      stk.GetMimetype(),
+			width:         int(stk.GetWidth()),
+			height:        int(stk.GetHeight()),
+			isAnimated:    stk.GetIsAnimated(),
+		}
+	}
+	return mediaMeta{}
 }
 
 func extractTextContent(msg *waProto.Message) string {

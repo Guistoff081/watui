@@ -7,7 +7,9 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,15 +29,16 @@ import (
 )
 
 type Client struct {
-	wm      *whatsmeow.Client
-	store   *sqlstore.Container
-	sendMsg func(tea.Msg)
-	mu      sync.Mutex
-	log     waLog.Logger
-	dbg     *debug.Logger
+	wm       *whatsmeow.Client
+	store    *sqlstore.Container
+	sendMsg  func(tea.Msg)
+	mu       sync.Mutex
+	log      waLog.Logger
+	dbg      *debug.Logger
+	mediaDir string
 }
 
-func NewClient(dbPath string, dbg *debug.Logger) (*Client, error) {
+func NewClient(dbPath, mediaDir string, dbg *debug.Logger) (*Client, error) {
 	container, err := sqlstore.New(
 		context.Background(),
 		"sqlite3",
@@ -71,10 +74,11 @@ func NewClient(dbPath string, dbg *debug.Logger) (*Client, error) {
 	wm := whatsmeow.NewClient(deviceStore, log)
 
 	c := &Client{
-		wm:    wm,
-		store: container,
-		log:   log,
-		dbg:   dbg,
+		wm:       wm,
+		store:    container,
+		log:      log,
+		dbg:      dbg,
+		mediaDir: mediaDir,
 	}
 
 	wm.AddEventHandler(c.handleEvent)
@@ -389,4 +393,140 @@ func (c *Client) JID() *types.JID {
 // WMClient returns the underlying whatsmeow client for advanced operations.
 func (c *Client) WMClient() *whatsmeow.Client {
 	return c.wm
+}
+
+// DownloadMedia downloads msg's media to the local cache and returns a cmd that
+// emits MediaDownloadedMsg or MediaDownloadFailedMsg when done.
+func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
+	return func() tea.Msg {
+		if msg.DirectPath == "" || len(msg.MediaKey) == 0 {
+			return theme.MediaDownloadFailedMsg{
+				ChatJID:   msg.ChatJID,
+				MessageID: msg.ID,
+				Err:       fmt.Errorf("no download metadata for message %s", msg.ID),
+			}
+		}
+
+		ext := extFromMime(msg.MimeType)
+		cachePath := filepath.Join(c.mediaDir, msg.ID+ext)
+
+		// Already cached — return immediately without a network call.
+		if _, err := os.Stat(cachePath); err == nil {
+			return theme.MediaDownloadedMsg{
+				ChatJID:   msg.ChatJID,
+				MessageID: msg.ID,
+				Path:      cachePath,
+			}
+		}
+
+		data, err := c.wm.DownloadMediaWithPath(
+			context.Background(),
+			msg.DirectPath,
+			msg.FileEncSHA256,
+			msg.FileSHA256,
+			msg.MediaKey,
+			waMediaType(msg.MediaType),
+			mmsType(msg.MediaType),
+			false,
+		)
+		if err != nil {
+			return theme.MediaDownloadFailedMsg{
+				ChatJID:   msg.ChatJID,
+				MessageID: msg.ID,
+				Err:       fmt.Errorf("download: %w", err),
+			}
+		}
+
+		if err := os.WriteFile(cachePath, data, 0o644); err != nil {
+			return theme.MediaDownloadFailedMsg{
+				ChatJID:   msg.ChatJID,
+				MessageID: msg.ID,
+				Err:       fmt.Errorf("write cache: %w", err),
+			}
+		}
+
+		return theme.MediaDownloadedMsg{
+			ChatJID:   msg.ChatJID,
+			MessageID: msg.ID,
+			Path:      cachePath,
+		}
+	}
+}
+
+// OpenMedia opens path in an appropriate external application (non-blocking).
+// Audio/voice messages are sent to the first available player; everything else
+// goes to xdg-open.
+func (c *Client) OpenMedia(path, mediaType string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch mediaType {
+		case "audio", "voice":
+			for _, player := range []string{"mpv", "ffplay", "aplay"} {
+				if _, err := exec.LookPath(player); err == nil {
+					cmd = exec.Command(player, path)
+					break
+				}
+			}
+		}
+		if cmd == nil {
+			cmd = exec.Command("xdg-open", path)
+		}
+		// Detach from our process group so the player survives if we exit.
+		_ = cmd.Start()
+		return nil
+	}
+}
+
+// waMediaType maps a theme media-type string to the whatsmeow MediaType constant.
+func waMediaType(mt string) whatsmeow.MediaType {
+	switch mt {
+	case "video", "gif":
+		return whatsmeow.MediaVideo
+	case "audio", "voice":
+		return whatsmeow.MediaAudio
+	case "document":
+		return whatsmeow.MediaDocument
+	default: // image, sticker
+		return whatsmeow.MediaImage
+	}
+}
+
+// mmsType maps a theme media-type string to the WhatsApp mms type string.
+func mmsType(mt string) string {
+	switch mt {
+	case "video", "gif":
+		return "video"
+	case "audio", "voice":
+		return "audio"
+	case "document":
+		return "document"
+	default:
+		return "image"
+	}
+}
+
+// extFromMime returns a file extension (with leading dot) for a MIME type.
+func extFromMime(mimeType string) string {
+	// Strip parameters (e.g. "image/jpeg; charset=utf-8" → "image/jpeg").
+	if idx := strings.IndexByte(mimeType, ';'); idx >= 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	exts, _ := mime.ExtensionsByType(mimeType)
+	if len(exts) > 0 {
+		return exts[0]
+	}
+	// Reasonable fallbacks for common WhatsApp types.
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/mpeg":
+		return ".mp3"
+	}
+	return ""
 }

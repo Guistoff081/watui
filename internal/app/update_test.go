@@ -27,6 +27,8 @@ func (fakeWA) MarkRead(types.JID, types.JID, []string)           {}
 func (fakeWA) GetAllContactNames() map[string]string            { return nil }
 func (fakeWA) GetGroupNames() map[string]string                 { return nil }
 func (fakeWA) AltChatJID(jid string) string                     { return "" }
+func (fakeWA) DownloadMedia(theme.Message) tea.Cmd              { return nil }
+func (fakeWA) OpenMedia(string, string) tea.Cmd                 { return nil }
 
 func newTestModel(t *testing.T) (Model, *store.Store) {
 	t.Helper()
