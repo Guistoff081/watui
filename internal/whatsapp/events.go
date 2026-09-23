@@ -2,11 +2,13 @@ package whatsapp
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/watui/watui/internal/theme"
 )
@@ -75,6 +77,11 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 }
 
 func (c *Client) handleMessage(evt *events.Message) {
+	if !isDisplayable(evt.Message) {
+		c.logSkipped(evt.Info.ID, evt.Message)
+		return
+	}
+
 	content := extractTextContent(evt.Message)
 	meta := extractMedia(evt.Message)
 
@@ -208,6 +215,11 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			}
 
 			msgInfo := wmi.GetKey()
+			if !isDisplayable(wmi.Message) {
+				c.logSkipped(msgInfo.GetID(), wmi.Message)
+				continue
+			}
+
 			meta := extractMedia(wmi.Message)
 
 			var content string
@@ -277,6 +289,65 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 	}
 
 	c.send(theme.HistorySyncCompleteMsg{})
+}
+
+// nonDisplayableFields lists waE2E.Message fields (proto names) that carry no
+// chat bubble of their own: transport metadata, reactions, protocol messages
+// (revoke, edit, ephemeral setting, history-sync and app-state key shares),
+// poll votes, pins and similar side effects. Edits and revokes are dropped
+// until proper handling lands.
+var nonDisplayableFields = map[protoreflect.Name]struct{}{
+	"messageContextInfo":                         {},
+	"senderKeyDistributionMessage":               {},
+	"fastRatchetKeySenderKeyDistributionMessage": {},
+	"reactionMessage":                            {},
+	"encReactionMessage":                         {},
+	"protocolMessage":                            {},
+	"editedMessage":                              {},
+	"pollUpdateMessage":                          {},
+	"pollAddOptionMessage":                       {},
+	"encEventResponseMessage":                    {},
+	"keepInChatMessage":                          {},
+	"pinInChatMessage":                           {},
+	"stickerSyncRmrMessage":                      {},
+	"placeholderMessage":                         {},
+	"secretEncryptedMessage":                     {},
+	"messageHistoryNotice":                       {},
+	"groupRootKeyShare":                          {},
+	"rootSecretDistributeMessage":                {},
+}
+
+// isDisplayable reports whether msg should appear in the chat. A message is
+// displayable when it populates at least one field outside
+// nonDisplayableFields, so unknown content-bearing kinds stay visible.
+func isDisplayable(msg *waProto.Message) bool {
+	if msg == nil {
+		return false
+	}
+	displayable := false
+	msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		if _, skip := nonDisplayableFields[fd.Name()]; !skip {
+			displayable = true
+			return false
+		}
+		return true
+	})
+	return displayable
+}
+
+// logSkipped records which populated fields caused a message to be dropped.
+func (c *Client) logSkipped(id string, msg *waProto.Message) {
+	if c.dbg == nil {
+		return
+	}
+	var fields []string
+	if msg != nil {
+		msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+			fields = append(fields, string(fd.Name()))
+			return true
+		})
+	}
+	c.dbg.Debug("skipping non-displayable message", "id", id, "fields", strings.Join(fields, ","))
 }
 
 type mediaMeta struct {
