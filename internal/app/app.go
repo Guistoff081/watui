@@ -338,9 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.handleMediaDownloaded(msg))
 
 	case theme.MediaDownloadFailedMsg:
-		if m.log != nil && msg.Err != nil {
-			m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
-		}
+		cmds = append(cmds, m.handleMediaDownloadFailed(msg))
 
 	case chatview.MediaOpenMsg:
 		cmds = append(cmds, m.handleMediaOpen(msg.ChatJID, msg.MessageID))
@@ -714,6 +712,25 @@ func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// handleMediaDownloadFailed logs a failed download. If it was the one the user
+// is waiting to open, the pending open is dropped and the error is surfaced in
+// the status bar; background (sticker auto-download) failures are only logged.
+func (m *Model) handleMediaDownloadFailed(msg theme.MediaDownloadFailedMsg) tea.Cmd {
+	if m.log != nil && msg.Err != nil {
+		m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
+	}
+	if msg.MessageID == "" || m.pendingOpenMsgID != msg.MessageID {
+		return nil
+	}
+	m.pendingOpenMsgID = ""
+	errText := "Media download failed"
+	if msg.Err != nil {
+		errText += ": " + msg.Err.Error()
+	}
+	m.statusBar.SetMessage(errText)
+	return clearStatusAfterDelay(4 * time.Second)
 }
 
 // stickerAutoDownloadCap bounds how many sticker downloads selectChat starts.
