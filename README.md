@@ -10,6 +10,7 @@ A terminal UI client for WhatsApp, built with Go + [Bubble Tea](https://github.c
 - Conversation list with unread counts
 - Real-time message receive and send
 - Message history with scroll
+- Media: inline half-block thumbnails, on-demand download, open/play with external apps
 - Typing indicators
 - Delivery/read receipts
 - Auto-reconnect on disconnect
@@ -22,15 +23,9 @@ A terminal UI client for WhatsApp, built with Go + [Bubble Tea](https://github.c
 
 ## Install
 
-### Option 1 — go install (quickest)
+> `go install github.com/.../cmd/watui@latest` is not supported yet: the Go module path (`github.com/watui/watui`) does not match the repository path. Build from source instead.
 
-```bash
-go install github.com/watui/watui/cmd/watui@latest
-```
-
-Installs the `watui` binary to `$(go env GOPATH)/bin` (usually `~/go/bin`). Requires GCC for the SQLite CGo dependency.
-
-### Option 2 — build from source
+### Option 1 — build from source
 
 ```bash
 git clone https://github.com/Guistoff081/watui
@@ -40,7 +35,7 @@ make install        # installs to ~/go/bin
 make build          # produces ./watui
 ```
 
-### Option 3 — release archive
+### Option 2 — release archive
 
 Download a pre-built archive from the [Releases](https://github.com/Guistoff081/watui/releases) page, extract, and place the binary on your `$PATH`:
 
@@ -93,13 +88,17 @@ The log captures Bubble Tea message flow, whatsmeow events at DEBUG level, error
 | `j` / `↓` | Chat list | Next conversation |
 | `k` / `↑` | Chat list | Previous conversation |
 | `Enter` | Chat list | Open conversation |
-| `j` / `↓` | Message view | Scroll down |
-| `k` / `↑` | Message view | Scroll up |
+| `j` / `↓` | Message view | Select next message |
+| `k` / `↑` | Message view | Select previous message |
+| `Enter` | Message view | Open / play selected media |
 | `g` / `G` | Message view | Top / bottom |
 | `Ctrl+U` / `Ctrl+D` | Message view | Page up / down |
 | `i` | Chat / messages | Focus input |
 | `Enter` | Input | Send message |
 | `Shift+Enter` | Input | New line |
+| `Ctrl+F` | Input | Attach file (type a path) |
+| `Ctrl+P` | Input | Send audio as voice note (type a path) |
+| `Ctrl+O` | Input | Pick a file with a GUI dialog |
 | `Esc` | Input / messages | Back to chat list |
 | `Ctrl+C` | Global | Quit |
 
@@ -109,6 +108,7 @@ All data is stored in `./data/` by default (override with `--data-dir`):
 
 - `whatsmeow.db` — WhatsApp session keys (whatsmeow-managed)
 - `watui.db` — Conversations and messages (app-managed)
+- `media/` — Downloaded media cache (private, `0700`)
 - `watui-debug.log` — Debug log (only when `--debug` or `WATUI_DEBUG=1` is set)
 
 ## Stack
