@@ -2,43 +2,13 @@ package app
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"go.mau.fi/whatsmeow/types"
 
-	"github.com/watui/watui/internal/store"
 	"github.com/watui/watui/internal/theme"
 )
-
-// fakeWA is a no-op WAClient for exercising app logic without a real connection.
-type fakeWA struct{}
-
-func (fakeWA) Connect() tea.Cmd                                  { return nil }
-func (fakeWA) Disconnect()                                       {}
-func (fakeWA) GenerateMessageID() string                         { return "genid" }
-func (fakeWA) SendTextMessage(types.JID, string, string) tea.Cmd { return nil }
-func (fakeWA) SendFileMessage(types.JID, string, string) tea.Cmd { return nil }
-func (fakeWA) SendAudioMessage(types.JID, string, string) tea.Cmd { return nil }
-func (fakeWA) SendChatPresence(types.JID, bool)                  {}
-func (fakeWA) MarkRead(types.JID, types.JID, []string)           {}
-func (fakeWA) GetAllContactNames() map[string]string            { return nil }
-func (fakeWA) GetGroupNames() map[string]string                 { return nil }
-func (fakeWA) AltChatJID(jid string) string                     { return "" }
-func (fakeWA) DownloadMedia(theme.Message) tea.Cmd              { return nil }
-func (fakeWA) OpenMedia(string, string) tea.Cmd                 { return nil }
-
-func newTestModel(t *testing.T) (Model, *store.Store) {
-	t.Helper()
-	s, err := store.New(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("store.New() error = %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	return NewModel(fakeWA{}, s, "test", nil), s
-}
 
 func msgIDs(msgs []theme.Message) []string {
 	out := make([]string, len(msgs))
