@@ -16,8 +16,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/rs/zerolog"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/rs/zerolog"
 	"github.com/watui/watui/internal/debug"
 	"github.com/watui/watui/internal/theme"
 	"go.mau.fi/whatsmeow"
