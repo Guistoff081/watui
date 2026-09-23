@@ -544,15 +544,9 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 
 	// Auto-download sticker files for the visible window (stickers have no embedded
 	// thumbnail, so they need the full file before a half-block preview can render).
-	const stickerAutoDownloadCap = 10
 	var stickerCmds []tea.Cmd
-	for _, msg := range messages {
-		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
-			stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
-			if len(stickerCmds) >= stickerAutoDownloadCap {
-				break
-			}
-		}
+	for _, msg := range stickersToAutoDownload(messages, stickerAutoDownloadCap) {
+		stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
 	}
 
 	focusCmd := m.setFocus(PanelMessages)
@@ -720,6 +714,23 @@ func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// stickerAutoDownloadCap bounds how many sticker downloads selectChat starts.
+const stickerAutoDownloadCap = 10
+
+// stickersToAutoDownload returns up to limit stickers that still need their file
+// downloaded, newest first. msgs is time-ascending, so walking backwards favours
+// the stickers visible at the bottom of the chat.
+func stickersToAutoDownload(msgs []theme.Message, limit int) []theme.Message {
+	var out []theme.Message
+	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
+		msg := msgs[i]
+		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
+			out = append(out, msg)
+		}
+	}
+	return out
 }
 
 // handleMediaOpen opens or downloads-then-opens the media for the selected message.
