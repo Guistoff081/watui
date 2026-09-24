@@ -14,8 +14,11 @@ import (
 	"github.com/watui/watui/internal/whatsapp"
 )
 
-// Set by -ldflags "-X main.version=..."
-var version = "dev"
+// Set by -ldflags "-X main.version=... -X main.commit=..."
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 func main() {
 	cfg := config.Load()
@@ -56,7 +59,7 @@ func main() {
 			}
 		}()
 
-		logger.Info("debug logging enabled", "log_file", logPath, "version", version)
+		logger.Info("debug logging enabled", "log_file", logPath, "version", version, "commit", commit)
 	}
 
 	waDBPath := filepath.Join(*dataDir, "whatsmeow.db")

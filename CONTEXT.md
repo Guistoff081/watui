@@ -36,15 +36,14 @@ watui/
 ├── internal/
 │   ├── app/
 │   │   ├── app.go                 # Root Bubble Tea model (orchestrator)
-│   │   ├── messages.go            # (reservado, vazio — tipos estão em theme/)
-│   │   ├── keymap.go              # (reservado, vazio — keymaps estão em theme/)
-│   │   └── styles.go              # (reservado, vazio — estilos estão em theme/)
+│   │   └── *_test.go              # merge/sort, alias JID, update handlers
 │   ├── theme/                     # Pacote central: modelos, tea.Msg, estilos, keymaps
 │   │   ├── models.go              # Conversation, Message structs + todos tea.Msg types
 │   │   ├── styles.go              # Lipgloss styles compartilhados
 │   │   └── keymap.go              # Keybindings compartilhados
 │   ├── whatsapp/
-│   │   ├── client.go              # whatsmeow wrapper: connect, send, LID resolution
+│   │   ├── client.go              # whatsmeow wrapper: connect, send, media download/open
+│   │   ├── jid.go                 # Canonicalização LID ↔ PN
 │   │   └── events.go              # whatsmeow events → theme.*Msg bridge
 │   ├── ui/
 │   │   ├── auth/
@@ -54,8 +53,9 @@ watui/
 │   │   │   ├── chatlist.go        # Chat list panel (bubbles/list)
 │   │   │   └── item.go            # list.Item para conversas
 │   │   ├── chatview/
-│   │   │   ├── chatview.go        # Message viewport (bubbles/viewport) + lazy-load
-│   │   │   └── message.go         # Renderização de mensagens
+│   │   │   ├── chatview.go        # Message viewport + cursor de seleção + lazy-load
+│   │   │   ├── message.go         # Renderização de mensagens (texto + media)
+│   │   │   └── media.go           # Thumbnails half-block (JPEG/PNG/WebP)
 │   │   ├── input/
 │   │   │   ├── input.go           # Text input (bubbles/textarea) + path input
 │   │   │   ├── filepicker.go      # GUI file picker (zenity/kdialog/qarma/yad)
@@ -64,15 +64,15 @@ watui/
 │   │   ├── statusbar/statusbar.go # Conexão, versão, JID
 │   │   └── titlebar/titlebar.go   # Nome do chat ativo, typing indicator
 │   ├── store/
-│   │   ├── store.go               # App-level SQLite (conversations + messages)
-│   │   └── migrations.go          # Schema + migrações
+│   │   ├── store.go               # App-level SQLite (conversations + messages + media)
+│   │   └── migrations.go          # Schema + migrações idempotentes
 │   ├── config/
 │   │   ├── config.go              # TOML config loading
 │   │   └── config_test.go
 │   └── debug/
 │       ├── logger.go              # Debug logger (zerolog → arquivo)
 │       └── logger_test.go
-├── data/                          # gitignored: whatsmeow.db, watui.db, debug.log
+├── data/                          # gitignored: whatsmeow.db, watui.db, media/, debug.log
 ├── mise.toml
 ├── go.mod
 ├── Makefile
@@ -141,14 +141,14 @@ QR Auth Screen: tela centralizada com QR em half-block chars (ou sextant blocks 
 | Tecla | Chat List | Message View | Input |
 | --- | --- | --- | --- |
 | Tab | → Messages | → Input | → Chat List |
-| j/↓ | Próximo chat | Scroll down | (texto) |
-| k/↑ | Chat anterior | Scroll up | (texto) |
-| Enter | Abrir chat | — | Enviar msg |
+| j/↓ | Próximo chat | Próxima mensagem (cursor) | (texto) |
+| k/↑ | Chat anterior | Mensagem anterior (cursor) | (texto) |
+| Enter | Abrir chat | Abrir/tocar media selecionada | Enviar msg |
 | i | Focar input | Focar input | — |
 | Esc | — | Focar chat list | Limpar/defocar |
 | Ctrl+C | Sair | Sair | Sair |
 | / | Buscar chats | — | — |
-| PgUp/PgDn | — | Meia tela up/down | — |
+| Ctrl+U/Ctrl+D | — | Meia tela up/down | — |
 | g/G | — | Topo/fim | — |
 | Ctrl+F | — | — | Modo attach (path) |
 | Ctrl+P | — | — | Modo audio (path) |
@@ -176,10 +176,19 @@ type Message struct {
     Timestamp  time.Time
     IsFromMe   bool
     Status     string // sending/sent/delivered/read/received/failed
+
+    // Media (zero = texto puro)
+    MediaType, MediaPath, MimeType, FileName string
+    Thumbnail                                []byte
+    Width, Height, Duration                  int
+    IsAnimated                               bool
+    DirectPath                               string // + MediaKey, FileSHA256, FileEncSHA256
 }
 ```
 
-SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat_jid, index por chat+timestamp).
+`Message.PreviewText()` gera o preview da chat list (`[image] legenda`, `[voice message]`…).
+
+SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat_jid, index por chat+timestamp, colunas de media adicionadas por migração idempotente).
 
 ---
 
@@ -244,24 +253,93 @@ SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat
 
 ---
 
-### 🔜 Fase 7: Renderização de Media
+#### 🟡 Fase 7: Renderização de Media (parcial)
 
-**Objetivo:** exibir imagens, figurinhas, GIFs e representar áudios na UI.
+Entregue:
+- Metadados de media em `theme.Message` + migração idempotente das colunas em `messages`
+- `extractMedia()` para image/video/gif/audio/voice/document/sticker (live + history sync)
+- Thumbnails embutidos (JPEG) renderizados em half-blocks 24-bit; figurinhas WebP estáticas decodificadas
+- Download on-demand via `DownloadMediaWithPath` com cache em `data/media/` (0o700/0o600, IDs sanitizados)
+- Cursor de seleção na message view; `Enter` abre imagem/documento (`xdg-open`) ou toca áudio (`mpv`/`ffplay`/`aplay`)
+- Auto-download de figurinhas ao abrir o chat (limite de 10)
 
-- Download de media on-demand via `wm.DownloadAny()` com cache local em `data/media/`
-- Imagens e GIFs: renderizar via **Kitty graphics protocol** (Ghostty suporta nativamente); fallback para sixel; fallback textual `[imagem]` + dimensões
-- Figurinhas (sticker): mesmo pipeline que imagem (WebP → display)
-- GIF animado: exibir primeiro frame estático com indicador `[GIF]`
-- Áudio/voz: exibir duração, waveform em ASCII blocks (amplitude aproximada)
-- Reprodução de áudio via subprocess (`mpv --no-video` / `ffplay -nodisp` / `aplay`) com tecla de atalho (e.g. `Enter` em mensagem de áudio selecionada)
-- Atualizar `theme.Message` para carregar `MediaType`, `MediaURL`, `MediaKey`, `MediaPath` (caminho local do cache)
-- Migração do schema: adicionar colunas de media na tabela `messages`
-
-**Verificação:** receber imagem → thumbnail aparece na conversa. Pressionar tecla em áudio → toca no terminal.
+Pendente (movido para Fase 13):
+- Kitty graphics protocol / sixel para imagens em resolução real
+- Primeiro frame de GIF/figurinha animada
+- Waveform ASCII para áudio
 
 ---
 
-### 🔜 Fase 8: Gravação e Envio de Áudio
+### 🔜 Fase 7.5: Estabilização (bugs + testes)
+
+**Objetivo:** corrigir bugs visíveis e criar base de testes antes de refatorar a arquitetura. Entregue como PRs empilhados (`phase-7.5/*`).
+
+- **Doc/infra:** CONTEXT.md atualizado, README (instalação), `main.commit` para o ldflag existente, remoção de arquivos vazios em `app/`
+- **Test harness:** fake de `WAClient` + helper de `app.Model` com store SQLite temporário
+- **Eventos:** reações, edições, revogações e demais `ProtocolMessage` não viram mais mensagens `[media]`; testes de tabela para `extractTextContent`/`extractMedia`
+- **Não lidas / preview / recibos:**
+  - Abrir o chat zera `UnreadCount` também no cache `m.conversations` (antes o badge voltava com o valor antigo +1)
+  - Mensagens `IsFromMe` (enviadas por outro dispositivo) não incrementam não lidas
+  - Preview da conversa usa `PreviewText()` (media sem legenda não deixa preview vazio)
+  - Recibos de leitura só para mensagens ainda não lidas; mensagem recebida com o chat aberto é marcada como lida
+- **Media:**
+  - Auto-download de figurinhas prioriza as mais recentes (visíveis), não as mais antigas
+  - Falha de download aparece na status bar e limpa o `pendingOpenMsgID`
+
+Backlog conhecido (não incluído na 7.5):
+- Possível reconexão dupla: app agenda `Connect()` enquanto whatsmeow já reconecta sozinho; após 5 tentativas o app para em silêncio
+- Lazy-load de mensagens antigas não deduplica nem consulta aliases LID↔PN
+- History sync de grupos sem `SenderName` e com `SenderJID` não canonicalizado
+- Qualquer `error` como `tea.Msg` derruba o app para `StateError`
+- Typing indicator exibe telefone em vez do nome e não resolve alias
+- `go install github.com/watui/watui/...` não funciona: module path ≠ repositório (`Guistoff081/watui`)
+
+---
+
+### 🔜 Fase 8: Core desacoplado (refactor para testabilidade)
+
+**Objetivo:** separar domínio e sessão WhatsApp do Bubble Tea — pré-requisito para daemon, plugin Omarchy e multi-conta.
+
+- Novo pacote `internal/core`: regras de conversas (merge, aliases, não lidas, preview, recibos) sem dependência de `tea`
+- `whatsapp.Client` emite eventos de domínio (`chan core.Event` / callback) e expõe métodos síncronos com `context.Context`; adapter fino converte para `tea.Msg`/`tea.Cmd`
+- Interface para o store no `app`/`core`; I/O de SQLite fora do `Update()` (via `tea.Cmd`); erros de persistência logados em vez de `_ =`
+- Quebrar `app.go` (~1000 linhas) em handlers por domínio
+- Metas de cobertura: `core` ≥ 80%, `whatsapp` (conversão de eventos) ≥ 60%, `app` ≥ 50%
+
+**Verificação:** `go test ./...` roda sem terminal nem rede; fluxo de mensagem testado ponta a ponta com fakes.
+
+---
+
+### 🔜 Fase 9: Daemon `watuid` + plugin Omarchy (Quickshell)
+
+**Objetivo:** a sessão WhatsApp roda em um daemon; TUI e shell do Omarchy são clientes.
+
+Motivação: o mesmo device whatsmeow não pode ser aberto por dois processos, então o plugin do shell precisa de um backend compartilhado.
+
+```
+watuid (systemd --user)
+  ├─ whatsmeow + store SQLite
+  └─ $XDG_RUNTIME_DIR/watui.sock  (NDJSON versionado: requests + stream de eventos)
+        ├─ watui (TUI) — cliente do socket
+        └─ plugin Quickshell — Socket + SplitParser (padrão de crmne.hyprmoncfg)
+```
+
+- Protocolo: `{type:"request",protocol_version:1,id,method,params}` / `{type:"event",...}`; métodos `subscribe`, `listChats`, `getMessages`, `send`, `markRead`, `pairQR`
+- `watui` detecta o socket e vira cliente; sem daemon, mantém modo embutido
+- Plugin em `~/.config/omarchy/plugins/watui/` (`manifest.json`, kinds `bar-widget` + `panel` + `service`):
+  - Bar widget: total de não lidas + estado de conexão (cores via `qs.Commons.Color`)
+  - Panel: chats recentes, preview, resposta rápida, QR de pareamento em QML
+  - Notificações via `omarchy-notification-send` (respeita chats silenciados)
+  - `IpcHandler { target: "watui" }` → `toggle`, `openChat`, `markAllRead`; binds Hyprland via `omarchy-shell watui toggle`
+  - Abrir TUI completa: `omarchy-launch-or-focus-tui --app-id=TUI.float watui`
+  - Settings via `barWidget.schema` (notificações, tamanho do preview)
+- Validação: `qmllint`, `omarchy plugin validate .`
+
+**Verificação:** daemon ativo → badge na barra atualiza ao receber mensagem → resposta rápida pelo painel aparece na TUI aberta.
+
+---
+
+### 🔜 Fase 10: Gravação e Envio de Áudio
 
 **Objetivo:** gravar áudios PTT diretamente no app, sem depender de arquivo externo.
 
@@ -277,7 +355,7 @@ SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat
 
 ---
 
-### 🔜 Fase 9: Temas e Esquemas de Cores
+### 🔜 Fase 11: Temas e Esquemas de Cores
 
 **Objetivo:** temas nomeados configuráveis e suporte a esquemas de cores customizados.
 
@@ -293,7 +371,7 @@ SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat
 
 ---
 
-### 🔜 Fase 10: Multi-tenant (Múltiplas Contas)
+### 🔜 Fase 12: Multi-tenant (Múltiplas Contas)
 
 **Objetivo:** suporte a múltiplas contas WhatsApp simultâneas (pessoal + business, etc.).
 
@@ -305,15 +383,20 @@ SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat
 - Chat list mostra conversas da conta ativa (ou view unificada com badge de conta)
 - Notificações de mensagens de contas em background (status bar badge)
 - Adicionar `AccountID` em `Conversation` e `Message`; atualizar schema SQLite
-- `WAClient` interface permanece a mesma; `app.Model` gerencia slice de clients
+- Com o daemon da Fase 9, `watuid` gerencia os clients; TUI/plugin escolhem a conta ativa
 
 **Verificação:** duas contas logadas → trocar entre elas → conversas e mensagens isoladas por conta.
 
 ---
 
-### 🔜 Fase 11: Melhorias e Otimizações
+### 🔜 Fase 13: Melhorias e Otimizações
 
 **Objetivo:** qualidade de vida, performance e features avançadas.
+
+#### Media (restante da Fase 7)
+- Kitty graphics protocol (Ghostty) com fallback sixel → half-block
+- Primeiro frame de GIF/figurinha animada com indicador `[GIF]`
+- Waveform ASCII para áudio/voz
 
 #### Search
 - Full-text search de mensagens via SQLite FTS5 (`CREATE VIRTUAL TABLE messages_fts`)
