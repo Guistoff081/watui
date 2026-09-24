@@ -34,7 +34,7 @@ func TestSelectChatAutoDownloadsNewestStickers(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: jid})
 	seedStored(t, &m, stickerMsgs(jid, 15))
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	wa.mu.Lock()
 	got := msgIDs(wa.downloads)
@@ -57,7 +57,7 @@ func setupPendingOpen(t *testing.T) (Model, *recordingWA, string) {
 		ID: "img1", ChatJID: jid, MediaType: "image", DirectPath: "/direct/img1",
 		Timestamp: time.Unix(100, 0),
 	}})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 	if cmd := m.handleMediaOpen(jid, "img1"); cmd == nil {
 		t.Fatal("handleMediaOpen() returned nil cmd, want download")
 	}
@@ -107,10 +107,9 @@ func TestMediaDownloadFailedBackgroundIsQuiet(t *testing.T) {
 func TestMediaDownloadedOpensPending(t *testing.T) {
 	m, wa, jid := setupPendingOpen(t)
 
-	updated, _ := m.Update(core.MediaDownloaded{
+	m = send(t, m, core.MediaDownloaded{
 		ChatJID: jid, MessageID: "img1", Path: "/cache/img1.jpg",
 	})
-	m = updated.(Model)
 
 	if m.pendingOpenMsgID != "" {
 		t.Fatalf("pendingOpenMsgID = %q, want cleared", m.pendingOpenMsgID)

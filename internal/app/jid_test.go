@@ -22,7 +22,7 @@ func TestHandleNewMessageResolvesLIDToExistingConversation(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: testPN, Name: "Alice"})
 	m.chatView.SetChat(testPN, false, nil)
 
-	m, _ = update(t, m, core.NewMessage{Message: core.Message{
+	m = send(t, m, core.NewMessage{Message: core.Message{
 		ID:        "live1",
 		ChatJID:   testLID,
 		Content:   "hello via lid",
@@ -54,7 +54,7 @@ func TestSelectChatLoadsStoredAliasHistory(t *testing.T) {
 		{ID: "l1", ChatJID: testLID, Timestamp: time.Unix(200, 0)},
 	})
 
-	m, _ = m.selectChat(testPN)
+	m = open(t, m, testPN)
 
 	if got, want := msgIDs(m.chats.Messages(testPN)), []string{"p1", "l1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Messages(pn) = %v, want %v (history under both JIDs)", got, want)

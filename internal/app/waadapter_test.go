@@ -118,15 +118,15 @@ func TestAdapterConnect(t *testing.T) {
 		}
 	})
 
-	t.Run("socket failure yields bare error", func(t *testing.T) {
+	t.Run("socket failure yields connectFailedMsg", func(t *testing.T) {
 		a := newWAAdapter(&fakeSyncWA{connectErr: connErr})
 		msg := a.Connect()()
-		err, ok := msg.(error)
+		cf, ok := msg.(connectFailedMsg)
 		if !ok {
-			t.Fatalf("Connect() msg = %T, want error", msg)
+			t.Fatalf("Connect() msg = %T, want connectFailedMsg", msg)
 		}
-		if err.Error() != "connect: dial failed" {
-			t.Errorf("error = %q, want %q", err.Error(), "connect: dial failed")
+		if cf.Err.Error() != "connect: dial failed" {
+			t.Errorf("error = %q, want %q", cf.Err.Error(), "connect: dial failed")
 		}
 	})
 

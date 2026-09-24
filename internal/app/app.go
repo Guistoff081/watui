@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -55,6 +57,21 @@ type WAClient interface {
 	OpenMedia(path, mediaType string) tea.Cmd
 }
 
+// Store is the persistence the app needs. Every call runs inside a tea.Cmd,
+// never in Update.
+type Store interface {
+	GetAllConversations(ctx context.Context) ([]core.Conversation, error)
+	UpsertConversation(ctx context.Context, conv core.Conversation) error
+	ClearUnread(ctx context.Context, jid string) error
+	InsertMessages(ctx context.Context, msgs []core.Message) error
+	GetMessagesForChats(ctx context.Context, chatJIDs []string, limit int) ([]core.Message, error)
+	GetMessagesBefore(ctx context.Context, chatJID string, before time.Time, limit int) ([]core.Message, error)
+	UpdateMessageStatus(ctx context.Context, msgID, status string) error
+	UpdateMessageMediaPath(ctx context.Context, chatJID, msgID, path string) error
+}
+
+var _ Store = (*store.Store)(nil)
+
 // --- private message types ---
 
 type conversationsLoadedMsg struct{ Conversations []core.Conversation }
@@ -62,7 +79,26 @@ type contactNamesMsg struct{ Names map[string]string }
 type olderMessagesLoadedMsg struct {
 	ChatJID  string
 	Messages []core.Message
+	Err      error
 }
+
+// chatLoadedMsg carries the stored history for a chat the user selected. Gen
+// ties it to that selection so a load that finishes after the user moved on
+// is dropped.
+type chatLoadedMsg struct {
+	JID      string
+	Gen      int
+	Messages []core.Message
+	Err      error
+}
+
+// persistErrMsg reports a failed store read or write. It is shown briefly in
+// the status bar; the in-memory state stays authoritative.
+type persistErrMsg struct{ Err error }
+
+// connectFailedMsg reports that the WhatsApp socket could not be opened. It is
+// the only error that switches the app to StateError.
+type connectFailedMsg struct{ Err error }
 type reconnectMsg struct{}
 type typingStopMsg struct{ gen int }
 type clearStatusMsg struct{}
@@ -72,8 +108,15 @@ type clearStatusMsg struct{}
 type Model struct {
 	state State
 	wa    WAClient
-	store *store.Store
+	store Store
 	focus Panel
+
+	// writes serializes store writes produced by Update; see writeQueue.
+	writes *writeQueue
+	// openGen counts chat selections so that only the latest load applies.
+	openGen int
+	// delay builds timer commands; tests replace it to avoid sleeping.
+	delay func(d time.Duration, msg tea.Msg) tea.Cmd
 
 	auth      auth.Model
 	chatList  chatlist.Model
@@ -108,11 +151,13 @@ type Model struct {
 	log *debug.Logger
 }
 
-func NewModel(wa WAClient, s *store.Store, version string, log *debug.Logger) Model {
+func NewModel(wa WAClient, s Store, version string, log *debug.Logger) Model {
 	return Model{
 		state:     StateAuth,
 		wa:        wa,
 		store:     s,
+		writes:    &writeQueue{store: s},
+		delay:     sleepThen,
 		log:       log,
 		focus:     PanelChatList,
 		auth:      auth.New(),
@@ -206,7 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reconnectAttempts++
 			delay := time.Duration(m.reconnectAttempts) * 3 * time.Second
 			m.statusBar.SetMessage(fmt.Sprintf("Reconnecting... (attempt %d)", m.reconnectAttempts))
-			cmds = append(cmds, reconnectAfterDelay(delay))
+			cmds = append(cmds, m.delay(delay, reconnectMsg{}))
 		} else if m.state != StateChat {
 			m.state = StateError
 			if msg.Err != nil {
@@ -231,16 +276,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.ClearMessage()
 
 	case contactNamesMsg:
-		m.applyEffects(m.chats.ApplyNames(msg.Names))
+		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(msg.Names)))
 
 	case core.ConversationUpdated:
-		m.applyEffects(m.chats.UpdateConversation(msg.Conversation))
+		cmds = append(cmds, m.applyEffects(m.chats.UpdateConversation(msg.Conversation)))
 
 	case core.MessagesLoaded:
 		// Merge (don't overwrite): history-sync batches can arrive after live
 		// messages, and must not discard them.
 		eff := m.chats.AddHistory(msg.ChatJID.String(), msg.Messages, m.chatView.ChatJID())
-		m.applyEffects(eff)
+		cmds = append(cmds, m.applyEffects(eff))
 		if eff.InView {
 			m.reloadChatView(eff.Chat)
 		}
@@ -256,6 +301,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadOlderMessagesCmd(msg.ChatJID))
 
 	case olderMessagesLoadedMsg:
+		if msg.Err != nil {
+			// Treated as the end of history, as before, but no longer silent.
+			cmds = append(cmds, m.reportStoreErr(msg.Err))
+		}
 		eff := m.chats.PrependOlder(msg.ChatJID, msg.Messages, m.chatView.ChatJID())
 		if eff.NoOlder {
 			m.chatView.SetNoMoreMessages()
@@ -267,15 +316,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatlist.ChatSelectedCmd:
 		return m.selectChat(msg.JID)
 
+	case chatLoadedMsg:
+		return m.openLoadedChat(msg)
+
+	case persistErrMsg:
+		cmds = append(cmds, m.reportStoreErr(msg.Err))
+
 	// --- Messages ---
 	case core.NewMessage:
 		return m.handleNewMessage(msg.Message)
 
 	case core.MessageSent:
-		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "sent")
+		cmds = append(cmds, m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "sent"))
 
 	case core.MessageSendFailed:
-		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "failed")
+		cmds = append(cmds, m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "failed"))
 		errText := "Send failed"
 		if msg.Err != nil {
 			errText = "Send failed: " + msg.Err.Error()
@@ -284,10 +339,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.statusBar.SetMessage(errText)
-		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
+		cmds = append(cmds, m.clearStatusAfter(statusTimeout))
 
 	case core.MessageStatus:
-		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, msg.Status)
+		cmds = append(cmds, m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, msg.Status))
 
 	// --- Media ---
 	case core.MediaDownloaded:
@@ -329,14 +384,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSendAudio(msg.Path)
 	case input.PickerErrorMsg:
 		m.statusBar.SetMessage(msg.Err)
-		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
+		cmds = append(cmds, m.clearStatusAfter(statusTimeout))
+
+	case connectFailedMsg:
+		m.state = StateError
+		m.lastErr = msg.Err
+		m.log.Error(msg.Err, "connect failed")
 
 	case error:
-		m.state = StateError
-		m.lastErr = msg
-		if m.log != nil {
-			m.log.Error(msg, "unhandled error")
-		}
+		// A stray error is logged and shown; only connectFailedMsg (above) and
+		// the login/disconnect events are fatal.
+		m.log.Error(msg, "unhandled error")
+		m.statusBar.SetMessage("Error: " + msg.Error())
+		cmds = append(cmds, m.clearStatusAfter(statusTimeout))
 	}
 
 	if m.state == StateAuth {
@@ -354,6 +414,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if key == "ctrl+c" {
+		// Drain queued writes synchronously: tea.Quit exits before pending
+		// flush commands run, and main closes the store right after.
+		if err := m.writes.flush(); err != nil {
+			m.log.Error(err, "store flush on quit")
+		}
 		m.wa.Disconnect()
 		return m, tea.Quit
 	}
@@ -388,7 +453,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, m.sendTypingPresenceCmd(true))
 				}
 				m.typingGen++
-				cmds = append(cmds, typingStopAfterIdle(m.typingGen))
+				cmds = append(cmds, m.delay(typingIdleTimeout, typingStopMsg{gen: m.typingGen}))
 			}
 			return m, tea.Batch(cmds...)
 		}
@@ -455,6 +520,9 @@ func (m *Model) applyFocus() {
 
 // --- Chat selection ---
 
+// selectChat switches to jid at once (title, view from the cache, focus) and
+// loads its stored history in the background; openLoadedChat finishes the
+// open when the history arrives.
 func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	conv, ok := m.chats.Conversation(jid)
 	if !ok {
@@ -462,44 +530,80 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	}
 
 	m.titleBar.SetChat(conv.Name, conv.JID, conv.IsGroup)
-
-	// Always merge the persisted recent history with whatever is cached in memory
-	// (live + offline-sync messages). Relying on the cache alone could show only
-	// a handful of offline-synced messages.
-	stored, _ := m.store.GetMessagesForChats(context.Background(), m.chats.Aliases(jid), 200)
-	eff, _ := m.chats.Open(jid, stored)
 	m.reloadChatView(jid)
-	m.applyEffects(eff)
+	m.openGen++
+	return *m, tea.Batch(m.loadChatCmd(jid, m.openGen), m.setFocus(PanelMessages))
+}
 
-	var cmds []tea.Cmd
-	for _, msg := range eff.Downloads {
-		cmds = append(cmds, m.wa.DownloadMedia(msg))
+// openLoadedChat merges the persisted recent history with whatever is cached
+// in memory (live + offline-sync messages) and applies the open: relying on
+// the cache alone could show only a handful of offline-synced messages. A
+// load for a selection the user already left is dropped.
+func (m *Model) openLoadedChat(msg chatLoadedMsg) (Model, tea.Cmd) {
+	if msg.Gen != m.openGen || msg.JID != m.chatView.ChatJID() {
+		return *m, nil
 	}
-	cmds = append(cmds, m.setFocus(PanelMessages))
+	var cmds []tea.Cmd
+	if msg.Err != nil {
+		cmds = append(cmds, m.reportStoreErr(msg.Err))
+	}
+	eff, ok := m.chats.Open(msg.JID, msg.Messages)
+	if !ok {
+		return *m, tea.Batch(cmds...)
+	}
+	m.reloadChatView(msg.JID)
+	cmds = append(cmds, m.applyEffects(eff))
+	for _, dl := range eff.Downloads {
+		cmds = append(cmds, m.wa.DownloadMedia(dl))
+	}
 	return *m, tea.Batch(cmds...)
 }
 
-// applyEffects performs the store writes, chat-list updates and read receipts
-// a core.Chats operation asked for. View changes are left to the caller since
-// they depend on the operation.
-func (m *Model) applyEffects(eff core.Effects) {
-	ctx := context.Background()
-	if len(eff.Messages) > 0 {
-		_ = m.store.InsertMessages(ctx, eff.Messages)
-	}
+// applyEffects updates the chat list for a core.Chats operation and returns
+// the commands that persist it and send its read receipts. View changes are
+// left to the caller since they depend on the operation.
+func (m *Model) applyEffects(eff core.Effects) tea.Cmd {
 	for _, conv := range eff.Conversations {
 		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(ctx, conv)
 	}
 	for _, jid := range eff.ClearUnread {
 		m.chatList.ClearUnread(jid)
-		_ = m.store.ClearUnread(ctx, jid)
 	}
-	m.sendReceipts(eff.Receipts)
+	return tea.Batch(m.persistEffects(eff), m.receiptsCmd(eff.Receipts))
 }
 
-// sendReceipts forwards read receipts to WhatsApp, skipping unparsable JIDs.
-func (m *Model) sendReceipts(receipts []core.Receipt) {
+// persistEffects queues eff's store writes as one ordered unit: conversations
+// first, since messages.chat_jid references them, then messages, then unread
+// resets.
+func (m *Model) persistEffects(eff core.Effects) tea.Cmd {
+	var ops []storeOp
+	for _, conv := range eff.Conversations {
+		ops = append(ops, storeOp{"save conversation", func(ctx context.Context, s Store) error {
+			return s.UpsertConversation(ctx, conv)
+		}})
+	}
+	if len(eff.Messages) > 0 {
+		msgs := append([]core.Message(nil), eff.Messages...)
+		ops = append(ops, storeOp{"save messages", func(ctx context.Context, s Store) error {
+			return s.InsertMessages(ctx, msgs)
+		}})
+	}
+	for _, jid := range eff.ClearUnread {
+		ops = append(ops, storeOp{"clear unread", func(ctx context.Context, s Store) error {
+			return s.ClearUnread(ctx, jid)
+		}})
+	}
+	return m.writes.enqueue(ops...)
+}
+
+// receiptsCmd sends read receipts to WhatsApp in the background, skipping
+// unparsable JIDs.
+func (m *Model) receiptsCmd(receipts []core.Receipt) tea.Cmd {
+	type receipt struct {
+		chat, sender types.JID
+		ids          []string
+	}
+	var rs []receipt
 	for _, r := range receipts {
 		chat, err := types.ParseJID(r.Chat)
 		if err != nil {
@@ -509,8 +613,26 @@ func (m *Model) sendReceipts(receipts []core.Receipt) {
 		if err != nil {
 			continue
 		}
-		m.wa.MarkRead(chat, sender, r.IDs)
+		rs = append(rs, receipt{chat, sender, append([]string(nil), r.IDs...)})
 	}
+	if len(rs) == 0 {
+		return nil
+	}
+	wa := m.wa
+	return func() tea.Msg {
+		for _, r := range rs {
+			wa.MarkRead(r.chat, r.sender, r.ids)
+		}
+		return nil
+	}
+}
+
+// reportStoreErr logs a persistence error and shows it briefly in the status
+// bar. It never changes the app state.
+func (m *Model) reportStoreErr(err error) tea.Cmd {
+	m.log.Error(err, "store")
+	m.statusBar.SetMessage("Storage error: " + err.Error())
+	return m.clearStatusAfter(statusTimeout)
 }
 
 // reloadChatView shows jid's cached messages in the chat view.
@@ -523,24 +645,26 @@ func (m *Model) reloadChatView(jid string) {
 
 func (m *Model) handleNewMessage(msg core.Message) (Model, tea.Cmd) {
 	eff := m.chats.AddMessage(msg, m.chatView.ChatJID())
-	m.applyEffects(eff)
+	cmd := m.applyEffects(eff)
 	for _, msg := range eff.Append {
 		m.chatView.AppendMessage(msg)
 	}
-	return *m, nil
+	return *m, cmd
 }
 
 // setMessageStatus updates a message's status in the in-memory cache, the open
-// chat view, and the persistent store, keyed by message ID.
-func (m *Model) setMessageStatus(chatJID, msgID, status string) {
+// chat view, and (via the returned command) the store, keyed by message ID.
+func (m *Model) setMessageStatus(chatJID, msgID, status string) tea.Cmd {
 	eff, ok := m.chats.SetStatus(chatJID, msgID, status, m.chatView.ChatJID())
 	if !ok {
-		return
+		return nil
 	}
 	if eff.InView {
 		m.chatView.UpdateMessageStatus(msgID, status)
 	}
-	_ = m.store.UpdateMessageStatus(context.Background(), msgID, status)
+	return m.writes.enqueue(storeOp{"save message status", func(ctx context.Context, s Store) error {
+		return s.UpdateMessageStatus(ctx, msgID, status)
+	}})
 }
 
 // handleMediaDownloaded updates the in-memory cache and store with the downloaded
@@ -548,7 +672,9 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 // download was triggered by a pending user open/play request.
 func (m *Model) handleMediaDownloaded(msg core.MediaDownloaded) tea.Cmd {
 	eff := m.chats.SetMediaPath(msg.ChatJID, msg.MessageID, msg.Path, m.chatView.ChatJID())
-	_ = m.store.UpdateMessageMediaPath(context.Background(), eff.Chat, msg.MessageID, msg.Path)
+	persist := m.writes.enqueue(storeOp{"save media path", func(ctx context.Context, s Store) error {
+		return s.UpdateMessageMediaPath(ctx, eff.Chat, msg.MessageID, msg.Path)
+	}})
 
 	m.chatView.InvalidateThumbnail(msg.MessageID)
 	if eff.InView {
@@ -558,10 +684,10 @@ func (m *Model) handleMediaDownloaded(msg core.MediaDownloaded) tea.Cmd {
 	if m.pendingOpenMsgID == msg.MessageID {
 		m.pendingOpenMsgID = ""
 		if cached, ok := m.chats.Find(eff.Chat, msg.MessageID); ok {
-			return m.wa.OpenMedia(msg.Path, cached.MediaType)
+			return tea.Batch(persist, m.wa.OpenMedia(msg.Path, cached.MediaType))
 		}
 	}
-	return nil
+	return persist
 }
 
 // handleMediaDownloadFailed logs a failed download. If it was the one the user
@@ -580,7 +706,7 @@ func (m *Model) handleMediaDownloadFailed(msg core.MediaDownloadFailed) tea.Cmd 
 		errText += ": " + msg.Err.Error()
 	}
 	m.statusBar.SetMessage(errText)
-	return clearStatusAfterDelay(4 * time.Second)
+	return m.clearStatusAfter(statusTimeout)
 }
 
 // handleMediaOpen opens or downloads-then-opens the media for the selected message.
@@ -598,8 +724,8 @@ func (m *Model) handleMediaOpen(chatJID, msgID string) tea.Cmd {
 }
 
 // addOutgoingMessage records an optimistic outgoing message in the cache, view,
-// store, and conversation preview, returning the message with its generated ID.
-func (m *Model) addOutgoingMessage(chatJID, id, content string) core.Message {
+// conversation preview and (via the returned command) the store.
+func (m *Model) addOutgoingMessage(chatJID, id, content string) tea.Cmd {
 	msg := core.Message{
 		ID:        id,
 		ChatJID:   chatJID,
@@ -612,8 +738,7 @@ func (m *Model) addOutgoingMessage(chatJID, id, content string) core.Message {
 	for _, msg := range eff.Append {
 		m.chatView.AppendMessage(msg)
 	}
-	m.applyEffects(eff)
-	return msg
+	return m.applyEffects(eff)
 }
 
 func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
@@ -627,9 +752,7 @@ func (m *Model) handleSendMessage(text string) (Model, tea.Cmd) {
 	}
 
 	id := m.wa.GenerateMessageID()
-	m.addOutgoingMessage(chatJID, id, text)
-
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.addOutgoingMessage(chatJID, id, text)}
 	if m.isTyping {
 		m.isTyping = false
 		m.typingGen++
@@ -651,9 +774,7 @@ func (m *Model) handleSendFile(path string) (Model, tea.Cmd) {
 
 	id := m.wa.GenerateMessageID()
 	label := fmt.Sprintf("[file] %s", filepath.Base(path))
-	m.addOutgoingMessage(chatJID, id, label)
-
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.addOutgoingMessage(chatJID, id, label)}
 	if m.isTyping {
 		m.isTyping = false
 		m.typingGen++
@@ -675,9 +796,7 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 
 	id := m.wa.GenerateMessageID()
 	label := fmt.Sprintf("[voice] %s", filepath.Base(path))
-	m.addOutgoingMessage(chatJID, id, label)
-
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.addOutgoingMessage(chatJID, id, label)}
 	if m.isTyping {
 		m.isTyping = false
 		m.typingGen++
@@ -690,12 +809,26 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 // --- Commands ---
 
 func (m Model) loadConversationsCmd() tea.Cmd {
+	s := m.store
 	return func() tea.Msg {
-		convs, err := m.store.GetAllConversations(context.Background())
+		convs, err := s.GetAllConversations(context.Background())
 		if err != nil {
-			return nil
+			return persistErrMsg{Err: fmt.Errorf("load conversations: %w", err)}
 		}
 		return conversationsLoadedMsg{Conversations: convs}
+	}
+}
+
+// loadChatCmd reads the recent stored history of jid and its alias for the
+// selection numbered gen.
+func (m Model) loadChatCmd(jid string, gen int) tea.Cmd {
+	s, aliases := m.store, m.chats.Aliases(jid)
+	return func() tea.Msg {
+		msgs, err := s.GetMessagesForChats(context.Background(), aliases, 200)
+		if err != nil {
+			err = fmt.Errorf("load messages: %w", err)
+		}
+		return chatLoadedMsg{JID: jid, Gen: gen, Messages: msgs, Err: err}
 	}
 }
 
@@ -718,10 +851,11 @@ func (m Model) loadOlderMessagesCmd(chatJID string) tea.Cmd {
 		return nil
 	}
 	before := msgs[0].Timestamp
+	s := m.store
 	return func() tea.Msg {
-		older, err := m.store.GetMessagesBefore(context.Background(), chatJID, before, 50)
+		older, err := s.GetMessagesBefore(context.Background(), chatJID, before, 50)
 		if err != nil {
-			return olderMessagesLoadedMsg{ChatJID: chatJID}
+			return olderMessagesLoadedMsg{ChatJID: chatJID, Err: fmt.Errorf("load older messages: %w", err)}
 		}
 		return olderMessagesLoadedMsg{ChatJID: chatJID, Messages: older}
 	}
@@ -742,25 +876,84 @@ func (m *Model) sendTypingPresenceCmd(composing bool) tea.Cmd {
 	}
 }
 
-func reconnectAfterDelay(d time.Duration) tea.Cmd {
+const (
+	// statusTimeout is how long transient status-bar messages stay up.
+	statusTimeout = 4 * time.Second
+	// typingIdleTimeout ends the composing presence after the last keystroke.
+	typingIdleTimeout = 4 * time.Second
+)
+
+// sleepThen is the production Model.delay: a command that yields msg after d.
+func sleepThen(d time.Duration, msg tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(d)
-		return reconnectMsg{}
+		return msg
 	}
 }
 
-func typingStopAfterIdle(gen int) tea.Cmd {
-	return func() tea.Msg {
-		time.Sleep(4 * time.Second)
-		return typingStopMsg{gen: gen}
-	}
+func (m *Model) clearStatusAfter(d time.Duration) tea.Cmd {
+	return m.delay(d, clearStatusMsg{})
 }
 
-func clearStatusAfterDelay(d time.Duration) tea.Cmd {
-	return func() tea.Msg {
-		time.Sleep(d)
-		return clearStatusMsg{}
+// storeOp is one queued store write; name prefixes its error.
+type storeOp struct {
+	name string
+	run  func(ctx context.Context, s Store) error
+}
+
+// writeQueue runs store writes off the Update goroutine while keeping the
+// order Update produced them in. Bubble Tea runs commands concurrently and in
+// no particular order, so commands do not carry their own writes: Update
+// appends to the queue and returns a flush command, and any flush drains
+// everything queued so far, in order, one flush at a time. Writes to the same
+// row therefore never overtake each other (e.g. a status update cannot land
+// before the insert of the message it refers to).
+type writeQueue struct {
+	store Store
+
+	mu      sync.Mutex // guards pending
+	pending []storeOp
+
+	flushMu sync.Mutex // serializes flushes
+}
+
+// enqueue appends ops and returns the command that flushes them, or nil when
+// there is nothing to write.
+func (q *writeQueue) enqueue(ops ...storeOp) tea.Cmd {
+	if len(ops) == 0 {
+		return nil
 	}
+	q.mu.Lock()
+	q.pending = append(q.pending, ops...)
+	q.mu.Unlock()
+	return q.flushCmd
+}
+
+// flush runs every pending op and joins their errors. A failed op does not
+// stop the ones after it.
+func (q *writeQueue) flush() error {
+	q.flushMu.Lock()
+	defer q.flushMu.Unlock()
+
+	q.mu.Lock()
+	ops := q.pending
+	q.pending = nil
+	q.mu.Unlock()
+
+	var errs []error
+	for _, op := range ops {
+		if err := op.run(context.Background(), q.store); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", op.name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (q *writeQueue) flushCmd() tea.Msg {
+	if err := q.flush(); err != nil {
+		return persistErrMsg{Err: err}
+	}
+	return nil
 }
 
 // isTypingKey returns true for keys that represent real text input

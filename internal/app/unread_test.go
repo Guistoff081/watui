@@ -16,7 +16,7 @@ func TestSelectChatClearsCachedUnreadCount(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: a, UnreadCount: 5})
 	seedConv(t, &m, core.Conversation{JID: b})
 
-	m, _ = m.selectChat(a)
+	m = open(t, m, a)
 	if got := conv(m, a).UnreadCount; got != 0 {
 		t.Fatalf("UnreadCount after select = %d, want 0", got)
 	}
@@ -27,8 +27,8 @@ func TestSelectChatClearsCachedUnreadCount(t *testing.T) {
 		}
 	}
 
-	m, _ = m.selectChat(b)
-	m, _ = m.handleNewMessage(core.Message{ID: "n1", ChatJID: a, Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = open(t, m, b)
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "n1", ChatJID: a, Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	if got := conv(m, a).UnreadCount; got != 1 {
 		t.Errorf("UnreadCount = %d, want 1 (stale count must not resurface)", got)
@@ -40,7 +40,7 @@ func TestHandleNewMessageOwnMessageNotUnread(t *testing.T) {
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
 
-	m, _ = m.handleNewMessage(core.Message{ID: "me1", ChatJID: jid, Content: "sent from phone", IsFromMe: true, Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "me1", ChatJID: jid, Content: "sent from phone", IsFromMe: true, Timestamp: time.Unix(100, 0)}})
 
 	if got := conv(m, jid).UnreadCount; got != 0 {
 		t.Errorf("UnreadCount = %d, want 0 for own message", got)
@@ -52,7 +52,7 @@ func TestHandleNewMessagePreviewUsesPreviewText(t *testing.T) {
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
 
-	m, _ = m.handleNewMessage(core.Message{ID: "img", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "img", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(100, 0)}})
 
 	if got := conv(m, jid).LastMessage; got != "[image]" {
 		t.Errorf("LastMessage = %q, want %q", got, "[image]")
@@ -65,7 +65,7 @@ func TestSelectChatPreviewUsesPreviewText(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: jid})
 	seedStored(t, &m, []core.Message{{ID: "img", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(100, 0)}})
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	if got := conv(m, jid).LastMessage; got != "[image]" {
 		t.Errorf("LastMessage = %q, want %q", got, "[image]")
@@ -92,7 +92,7 @@ func TestSelectChatNoUnreadSendsNoReceipts(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: jid})
 	seedStored(t, &m, incoming(jid, 5))
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	if len(wa.markReads) != 0 {
 		t.Errorf("MarkRead calls = %+v, want none", wa.markReads)
@@ -108,7 +108,7 @@ func TestSelectChatMarksOnlyUnreadMessages(t *testing.T) {
 	msgs = append(msgs[:4], core.Message{ID: "own", ChatJID: jid, IsFromMe: true, Timestamp: time.Unix(103, 500)}, msgs[4])
 	seedStored(t, &m, msgs)
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	if got, want := wa.markedReadIDs(), []string{"m4", "m5"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("marked IDs = %v, want %v", got, want)
@@ -129,7 +129,7 @@ func TestSelectChatGroupMarksUnreadPerSender(t *testing.T) {
 	}
 	seedStored(t, &m, msgs)
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	got := map[string][]string{}
 	for _, c := range wa.markReads {
@@ -148,9 +148,9 @@ func TestHandleNewMessageInOpenChatMarksRead(t *testing.T) {
 	m, _, wa := newRecordingModel(t)
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
-	m, _ = m.handleNewMessage(core.Message{ID: "n1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "n1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	if len(wa.markReads) != 1 {
 		t.Fatalf("MarkRead calls = %+v, want 1", wa.markReads)
@@ -168,9 +168,9 @@ func TestHandleNewMessageInOpenGroupMarksReadWithSender(t *testing.T) {
 	jid := "g@g.us"
 	sender := "alice@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid, IsGroup: true})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
-	m, _ = m.handleNewMessage(core.Message{ID: "n1", ChatJID: jid, SenderJID: sender, Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "n1", ChatJID: jid, SenderJID: sender, Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	if len(wa.markReads) != 1 {
 		t.Fatalf("MarkRead calls = %+v, want 1", wa.markReads)
@@ -184,9 +184,9 @@ func TestHandleNewMessageOwnInOpenChatNotMarked(t *testing.T) {
 	m, _, wa := newRecordingModel(t)
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
-	m, _ = m.handleNewMessage(core.Message{ID: "me1", ChatJID: jid, IsFromMe: true, Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "me1", ChatJID: jid, IsFromMe: true, Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	if len(wa.markReads) != 0 {
 		t.Errorf("MarkRead calls = %+v, want none for own message", wa.markReads)
@@ -198,9 +198,9 @@ func TestHandleNewMessageInOtherChatNotMarked(t *testing.T) {
 	a, b := "a@s.whatsapp.net", "b@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: a})
 	seedConv(t, &m, core.Conversation{JID: b})
-	m, _ = m.selectChat(b)
+	m = open(t, m, b)
 
-	m, _ = m.handleNewMessage(core.Message{ID: "n1", ChatJID: a, Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "n1", ChatJID: a, Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	if len(wa.markReads) != 0 {
 		t.Errorf("MarkRead calls = %+v, want none for background chat", wa.markReads)
