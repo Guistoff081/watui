@@ -414,6 +414,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if key == "ctrl+c" {
+		// Drain queued writes synchronously: tea.Quit exits before pending
+		// flush commands run, and main closes the store right after.
+		if err := m.writes.flush(); err != nil {
+			m.log.Error(err, "store flush on quit")
+		}
 		m.wa.Disconnect()
 		return m, tea.Quit
 	}

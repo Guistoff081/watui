@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/watui/watui/internal/core"
 )
 
@@ -262,5 +264,20 @@ func TestOlderMessagesLoadErrorIsReported(t *testing.T) {
 
 	if !strings.Contains(m.statusBar.View(), "gone") {
 		t.Errorf("status bar = %q, want load error", m.statusBar.View())
+	}
+}
+
+// Quitting must not drop writes still in the queue: tea.Quit ends the program
+// before pending flush commands run, and main closes the store right after.
+func TestQuitFlushesPendingWrites(t *testing.T) {
+	m, fs, _ := newFakeStoreModel(t)
+	m.writes.enqueue(storeOp{"save conversation", func(ctx context.Context, s Store) error {
+		return s.UpsertConversation(ctx, core.Conversation{JID: "q@s.whatsapp.net"})
+	}})
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}) // flush cmd deliberately never run
+
+	if got := fs.Calls(); len(got) != 1 || got[0] != "UpsertConversation q@s.whatsapp.net" {
+		t.Fatalf("store calls on quit = %v, want the pending upsert", got)
 	}
 }
