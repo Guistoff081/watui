@@ -43,6 +43,7 @@ watui/
 │   │   ├── media.go / send.go     # Download/abrir mídia; envio texto/arquivo/áudio
 │   │   ├── commands.go            # Cmds de carga (store, nomes), timers
 │   │   ├── view.go                # Layout + View
+│   │   ├── leader.go / overlay.go # Leader (Space) + which-key; overlays (help)
 │   │   ├── waadapter.go           # WAClient (tea.Cmd) sobre whatsapp.Client síncrono
 │   │   └── *_test.go              # fakes (WA, store), driver de cmds, fluxos, unread, mídia
 │   ├── core/                      # Domínio sem UI: modelos + eventos + regras
@@ -157,6 +158,9 @@ QR Auth Screen: tela centralizada com QR em half-block chars (ou sextant blocks 
 | Tecla | Chat List | Message View | Input |
 | --- | --- | --- | --- |
 | Tab | → Messages | → Input | → Chat List |
+| Space | Leader (popup de comandos) | Leader (popup de comandos) | (espaço) |
+| Space a f / a a / a o | Anexar arquivo / áudio / GUI picker | Anexar arquivo / áudio / GUI picker | — |
+| Space ? | Todas as teclas | Todas as teclas | — |
 | j/↓ | Próximo chat | Próxima mensagem (cursor) | (texto) |
 | k/↑ | Chat anterior | Mensagem anterior (cursor) | (texto) |
 | Enter | Abrir chat | Abrir/tocar media selecionada | Enviar msg |
@@ -387,6 +391,7 @@ watuid (systemd --user)
 - Live reload de tema sem reiniciar (reprocessar estilos lipgloss)
 - Cores de remetentes em grupos geradas dinamicamente a partir do JID (hash → cor da paleta do tema)
 - Exportar paleta atual como arquivo TOML (comando `watui --export-theme`)
+- Seção `[keys]` no `config.toml` poderá remapear o registry de comandos do leader (`internal/ui/commands`)
 
 **Verificação:** trocar tema no config → reiniciar → UI em novo esquema de cores. Override de cor individual funciona.
 

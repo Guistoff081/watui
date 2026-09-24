@@ -9,6 +9,7 @@ import (
 	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/ui/chatlist"
 	"github.com/watui/watui/internal/ui/chatview"
+	"github.com/watui/watui/internal/ui/commands"
 	"github.com/watui/watui/internal/ui/input"
 )
 
@@ -22,6 +23,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case commands.InvokeMsg:
+		cmds = append(cmds, m.dispatchCommand(msg.ID))
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
