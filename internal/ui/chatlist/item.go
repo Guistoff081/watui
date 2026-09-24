@@ -2,7 +2,10 @@ package chatlist
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/watui/watui/internal/core"
 )
@@ -19,10 +22,13 @@ func (i Item) Title() string {
 	return core.DisplayName(i.conversation)
 }
 
+// Description is the one-line preview: newlines and runs of whitespace are
+// collapsed (business messages are multi-line) and it is cut by display
+// width, never mid-character.
 func (i Item) Description() string {
-	preview := i.conversation.LastMessage
-	if len(preview) > 40 {
-		preview = preview[:40] + "..."
+	preview := strings.Join(strings.Fields(i.conversation.LastMessage), " ")
+	if ansi.StringWidth(preview) > 40 {
+		preview = ansi.Truncate(preview, 40, "") + "..."
 	}
 	return preview
 }
