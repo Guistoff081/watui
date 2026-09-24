@@ -33,7 +33,13 @@ func (m Model) loadChatCmd(jid string, gen int) tea.Cmd {
 	}
 }
 
+// loadContactNamesCmd resolves names for the chat list: address book and
+// group subjects first, then verified business names for 1:1 chats still
+// unnamed (numbers outside the address book, typically companies). The
+// candidate list is taken now, on the Update goroutine; the lookups run in
+// the command.
 func (m Model) loadContactNamesCmd() tea.Cmd {
+	unnamed := m.chats.UnnamedDirectChats()
 	return func() tea.Msg {
 		names := m.wa.GetAllContactNames()
 		if names == nil {
@@ -41,6 +47,17 @@ func (m Model) loadContactNamesCmd() tea.Cmd {
 		}
 		for jid, name := range m.wa.GetGroupNames() {
 			names[jid] = name
+		}
+		var ask []string
+		for _, jid := range unnamed {
+			if names[jid] == "" {
+				ask = append(ask, jid)
+			}
+		}
+		if len(ask) > 0 {
+			for jid, name := range m.wa.GetVerifiedNames(ask) {
+				names[jid] = name
+			}
 		}
 		return contactNamesMsg{Names: names}
 	}

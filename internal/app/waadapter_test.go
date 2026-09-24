@@ -48,6 +48,10 @@ type fakeSyncWA struct {
 	openErr  error
 	openPath string
 
+	verified    map[string]string
+	verifiedErr error
+	verifiedArg []string
+
 	historyErr    error
 	historyAnchor string
 	historyCount  int
@@ -107,6 +111,11 @@ func (f *fakeSyncWA) DownloadMedia(_ context.Context, msg core.Message) (string,
 func (f *fakeSyncWA) OpenMedia(path, mediaType string) error {
 	f.openPath, f.openType = path, mediaType
 	return f.openErr
+}
+
+func (f *fakeSyncWA) GetVerifiedNames(_ context.Context, jids []string) (map[string]string, error) {
+	f.verifiedArg = jids
+	return f.verified, f.verifiedErr
 }
 
 func (f *fakeSyncWA) RequestOlderHistory(_ context.Context, oldest core.Message, count int) error {
@@ -291,5 +300,18 @@ func TestAdapterRequestOlderHistory(t *testing.T) {
 	got := newWAAdapter(&fakeSyncWA{historyErr: fail}).RequestOlderHistory(core.Message{ID: "OLD"})()
 	if msg, ok := got.(historyRequestFailedMsg); !ok || !errors.Is(msg.Err, fail) {
 		t.Errorf("failure msg = %#v, want historyRequestFailedMsg", got)
+	}
+}
+
+func TestAdapterGetVerifiedNames(t *testing.T) {
+	f := &fakeSyncWA{verified: map[string]string{"b@s.whatsapp.net": "Jeitto"}}
+	got := newWAAdapter(f).GetVerifiedNames([]string{"b@s.whatsapp.net"})
+	if got["b@s.whatsapp.net"] != "Jeitto" || !reflect.DeepEqual(f.verifiedArg, []string{"b@s.whatsapp.net"}) {
+		t.Errorf("GetVerifiedNames() = %v (asked %v)", got, f.verifiedArg)
+	}
+	// On error the names found so far are kept (usync is batched).
+	f = &fakeSyncWA{verified: map[string]string{"b@s.whatsapp.net": "Jeitto"}, verifiedErr: errors.New("offline")}
+	if got := newWAAdapter(f).GetVerifiedNames([]string{"b@s.whatsapp.net"}); got["b@s.whatsapp.net"] != "Jeitto" {
+		t.Errorf("partial result dropped on error: %v", got)
 	}
 }

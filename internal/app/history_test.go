@@ -87,3 +87,41 @@ func mustJID(t *testing.T, s string) types.JID {
 	}
 	return j
 }
+
+// Unnamed 1:1 chats the address book can't name are looked up as businesses;
+// chats named by contacts are not queried, and verified names are applied.
+func TestContactNamesQueryVerifiedBusinessNames(t *testing.T) {
+	wa := &recordingWA{
+		contactNames:  map[string]string{"c@s.whatsapp.net": "Carla"},
+		verifiedNames: map[string]string{"b@s.whatsapp.net": "Jeitto"},
+	}
+	m := testModel(wa, newTestStore(t))
+	m.chats.Load([]core.Conversation{{JID: "b@s.whatsapp.net"}, {JID: "c@s.whatsapp.net"}, {JID: "g@g.us"}})
+
+	m = send(t, m, core.HistorySyncComplete{})
+
+	if want := [][]string{{"b@s.whatsapp.net"}}; !reflect.DeepEqual(wa.verifiedQueries, want) {
+		t.Errorf("verified-name queries = %v, want %v", wa.verifiedQueries, want)
+	}
+	if conv, _ := m.chats.Conversation("b@s.whatsapp.net"); conv.Name != "Jeitto" {
+		t.Errorf("business chat name = %q, want Jeitto", conv.Name)
+	}
+	if conv, _ := m.chats.Conversation("c@s.whatsapp.net"); conv.Name != "Carla" {
+		t.Errorf("contact chat name = %q, want Carla", conv.Name)
+	}
+}
+
+// On a normal start (no history sync) names must be resolved after the
+// stored conversations are loaded, or the unnamed list is still empty.
+func TestStartupLooksUpBusinessNamesAfterConversationsLoad(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertConversation(context.Background(), core.Conversation{JID: "b@s.whatsapp.net"})
+	wa := &recordingWA{verifiedNames: map[string]string{"b@s.whatsapp.net": "Jeitto"}}
+	m := testModel(wa, s)
+
+	m = send(t, m, core.Connected{})
+
+	if conv, _ := m.chats.Conversation("b@s.whatsapp.net"); conv.Name != "Jeitto" {
+		t.Errorf("after startup name = %q, want Jeitto (queries: %v)", conv.Name, wa.verifiedQueries)
+	}
+}

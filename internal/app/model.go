@@ -49,6 +49,9 @@ type WAClient interface {
 	MarkRead(chatJID types.JID, sender types.JID, messageIDs []string)
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
+	// GetVerifiedNames returns verified business names for jids (blocking;
+	// call from a command).
+	GetVerifiedNames(jids []string) map[string]string
 	AltChatJID(jid string) string
 	DownloadMedia(msg core.Message) tea.Cmd
 	OpenMedia(path, mediaType string) tea.Cmd

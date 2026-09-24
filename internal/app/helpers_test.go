@@ -30,6 +30,7 @@ func (fakeWA) AltChatJID(jid string) string                       { return "" }
 func (fakeWA) DownloadMedia(core.Message) tea.Cmd                 { return nil }
 func (fakeWA) OpenMedia(string, string) tea.Cmd                   { return nil }
 func (fakeWA) RequestOlderHistory(core.Message) tea.Cmd           { return nil }
+func (fakeWA) GetVerifiedNames([]string) map[string]string        { return nil }
 
 // markReadCall records one MarkRead invocation.
 type markReadCall struct {
@@ -58,6 +59,33 @@ type recordingWA struct {
 	presence     []bool   // SendChatPresence composing values, in order
 	texts        []string // SendTextMessage bodies
 	historyReqs  []string // RequestOlderHistory anchors as "<msgID>@<chatJID>"
+
+	contactNames    map[string]string // GetAllContactNames result
+	verifiedNames   map[string]string // GetVerifiedNames answers
+	verifiedQueries [][]string        // GetVerifiedNames arguments
+}
+
+func (r *recordingWA) GetAllContactNames() map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]string, len(r.contactNames))
+	for k, v := range r.contactNames {
+		out[k] = v
+	}
+	return out
+}
+
+func (r *recordingWA) GetVerifiedNames(jids []string) map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.verifiedQueries = append(r.verifiedQueries, append([]string(nil), jids...))
+	out := make(map[string]string)
+	for _, j := range jids {
+		if n, ok := r.verifiedNames[j]; ok {
+			out[j] = n
+		}
+	}
+	return out
 }
 
 func (r *recordingWA) RequestOlderHistory(oldest core.Message) tea.Cmd {

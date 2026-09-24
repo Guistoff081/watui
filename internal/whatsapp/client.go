@@ -381,6 +381,51 @@ func (c *Client) GetAllContactNames(ctx context.Context) (map[string]string, err
 	return names, nil
 }
 
+// verifiedNamesBatch bounds how many users one usync query asks about.
+const verifiedNamesBatch = 50
+
+// GetVerifiedNames returns the verified business name for each of jids that
+// is a business account, keyed by JID string. Businesses outside the address
+// book (banks, stores…) have no contact name and often no push name; this is
+// where WhatsApp's own clients get "Jeitto" instead of a phone number.
+// Invalid and group JIDs are skipped.
+func (c *Client) GetVerifiedNames(ctx context.Context, jids []string) (map[string]string, error) {
+	var users []types.JID
+	for _, s := range jids {
+		jid, err := types.ParseJID(s)
+		if err != nil || jid.User == "" || jid.Server == types.GroupServer {
+			continue
+		}
+		users = append(users, jid.ToNonAD())
+	}
+	names := make(map[string]string)
+	for start := 0; start < len(users); start += verifiedNamesBatch {
+		batch := users[start:min(start+verifiedNamesBatch, len(users))]
+		infos, err := c.wm.GetUserInfo(ctx, batch)
+		if err != nil {
+			return names, fmt.Errorf("get user info: %w", err)
+		}
+		for jid, name := range verifiedNames(infos) {
+			names[jid] = name
+		}
+	}
+	return names, nil
+}
+
+// verifiedNames extracts the verified business names from a usync result.
+func verifiedNames(infos map[types.JID]types.UserInfo) map[string]string {
+	names := make(map[string]string)
+	for jid, info := range infos {
+		if info.VerifiedName == nil {
+			continue
+		}
+		if name := info.VerifiedName.Details.GetVerifiedName(); name != "" {
+			names[jid.String()] = name
+		}
+	}
+	return names
+}
+
 // GetGroupNames returns a map of JID string -> group name for all joined groups.
 func (c *Client) GetGroupNames(ctx context.Context) (map[string]string, error) {
 	groups, err := c.wm.GetJoinedGroups(ctx)

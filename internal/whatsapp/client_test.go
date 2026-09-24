@@ -14,6 +14,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	waVnameCert "go.mau.fi/whatsmeow/proto/waVnameCert"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -704,5 +705,30 @@ func TestHistoryRequestInfo(t *testing.T) {
 	c, _ := newStoreClient(t)
 	if err := c.RequestOlderHistory(context.Background(), oldest, 50); err == nil {
 		t.Error("RequestOlderHistory offline = nil, want an error")
+	}
+}
+
+func TestVerifiedNames(t *testing.T) {
+	biz := types.NewJID("551151948658", types.DefaultUserServer)
+	person := types.NewJID("5511999999999", types.DefaultUserServer)
+	got := verifiedNames(map[types.JID]types.UserInfo{
+		biz:    {VerifiedName: &types.VerifiedName{Details: &waVnameCert.VerifiedNameCertificate_Details{VerifiedName: proto.String("Jeitto")}}},
+		person: {Status: "hey"}, // not a business
+	})
+	if len(got) != 1 || got[biz.String()] != "Jeitto" {
+		t.Errorf("verifiedNames() = %v, want only the business name", got)
+	}
+}
+
+func TestGetVerifiedNamesInput(t *testing.T) {
+	c, _ := newStoreClient(t)
+	if got, err := c.GetVerifiedNames(context.Background(), nil); err != nil || len(got) != 0 {
+		t.Errorf("no JIDs = %v, %v; want empty, nil without a network call", got, err)
+	}
+	if got, err := c.GetVerifiedNames(context.Background(), []string{"no-user", "123@g.us"}); err != nil || len(got) != 0 {
+		t.Errorf("only invalid/group JIDs = %v, %v; want skipped", got, err)
+	}
+	if _, err := c.GetVerifiedNames(context.Background(), []string{testPN.String()}); err == nil {
+		t.Error("offline query = nil error, want the usync failure")
 	}
 }

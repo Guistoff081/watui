@@ -952,3 +952,16 @@ func TestAddHistoryOlderPageInViewIsPrepend(t *testing.T) {
 		t.Errorf("Prepend = %v for a message inside the loaded range, want a reload", msgIDs(eff.Prepend))
 	}
 }
+
+func TestUnnamedDirectChats(t *testing.T) {
+	c := NewChats(nil)
+	c.Load([]Conversation{
+		{JID: "b@s.whatsapp.net"},
+		{JID: "a@s.whatsapp.net", Name: "a@s.whatsapp.net"}, // name is just the JID
+		{JID: "named@s.whatsapp.net", Name: "Ana"},
+		{JID: "g@g.us"},
+	})
+	if got := c.UnnamedDirectChats(); !reflect.DeepEqual(got, []string{"a@s.whatsapp.net", "b@s.whatsapp.net"}) {
+		t.Errorf("UnnamedDirectChats() = %v, want the two unnamed 1:1 chats, sorted", got)
+	}
+}
