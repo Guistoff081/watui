@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"go.mau.fi/whatsmeow/types"
 
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/debug"
 	"github.com/watui/watui/internal/store"
 	"github.com/watui/watui/internal/theme"
@@ -51,17 +52,17 @@ type WAClient interface {
 	GetAllContactNames() map[string]string
 	GetGroupNames() map[string]string
 	AltChatJID(jid string) string
-	DownloadMedia(msg theme.Message) tea.Cmd
+	DownloadMedia(msg core.Message) tea.Cmd
 	OpenMedia(path, mediaType string) tea.Cmd
 }
 
 // --- private message types ---
 
-type conversationsLoadedMsg struct{ Conversations []theme.Conversation }
+type conversationsLoadedMsg struct{ Conversations []core.Conversation }
 type contactNamesMsg struct{ Names map[string]string }
 type olderMessagesLoadedMsg struct {
 	ChatJID  string
-	Messages []theme.Message
+	Messages []core.Message
 }
 type reconnectMsg struct{}
 type typingStopMsg struct{ gen int }
@@ -88,8 +89,8 @@ type Model struct {
 	connectedJID string
 	lastErr      error
 
-	chatMessages  map[string][]theme.Message
-	conversations map[string]theme.Conversation
+	chatMessages  map[string][]core.Message
+	conversations map[string]core.Conversation
 
 	// Typing indicator state
 	isTyping  bool
@@ -119,8 +120,8 @@ func NewModel(wa WAClient, s *store.Store, version string, log *debug.Logger) Mo
 		input:         input.New(),
 		titleBar:      titlebar.New(),
 		statusBar:     statusbar.New(version),
-		chatMessages:  make(map[string][]theme.Message),
-		conversations: make(map[string]theme.Conversation),
+		chatMessages:  make(map[string][]core.Message),
+		conversations: make(map[string]core.Conversation),
 	}
 }
 
@@ -151,12 +152,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	// --- Auth ---
-	case theme.QRCodeMsg:
+	case core.QRCode:
 		m.state = StateAuth
 		m.auth.SetDimensions(m.width, m.height)
 		m.auth.SetQRCode(msg.Code)
 
-	case theme.QRTimeoutMsg:
+	case core.QRTimeout:
 		m.state = StateAuth
 		m.auth.SetDimensions(m.width, m.height)
 		m.auth.SetQRTimeout()
@@ -165,11 +166,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.wa.Connect())
 
-	case theme.LoginSuccessMsg:
+	case core.LoginSuccess:
 		m.connectedJID = msg.JID.String()
 		m.auth.SetStatus("QR scanned. Finishing login...")
 
-	case theme.ConnectedMsg:
+	case core.Connected:
 		m.connectedJID = msg.JID.String()
 		m.state = StateChat
 		m.lastErr = nil
@@ -180,14 +181,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		cmds = append(cmds, m.loadConversationsCmd(), m.loadContactNamesCmd())
 
-	case theme.LoginFailedMsg:
+	case core.LoginFailed:
 		m.state = StateError
 		m.lastErr = msg.Err
 		if m.log != nil && msg.Err != nil {
 			m.log.Error(msg.Err, "login failed")
 		}
 
-	case theme.ClientOutdatedMsg:
+	case core.ClientOutdated:
 		m.state = StateError
 		m.lastErr = fmt.Errorf(
 			"WhatsApp rejected the connection: client version outdated (405).\n\n" +
@@ -198,7 +199,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.log.Error(m.lastErr, "client outdated")
 		}
 
-	case theme.DisconnectedMsg:
+	case core.Disconnected:
 		m.statusBar.SetDisconnected()
 		if m.state == StateChat && msg.Err == nil && m.reconnectAttempts < 5 {
 			// Unexpected disconnect — schedule a reconnect attempt with linear backoff.
@@ -241,7 +242,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case theme.ConversationUpdatedMsg:
+	case core.ConversationUpdated:
 		jid := msg.Conversation.JID
 		updated := msg.Conversation
 		if existing, ok := m.conversations[jid]; ok {
@@ -257,7 +258,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chatList.UpsertConversation(updated)
 		_ = m.store.UpsertConversation(context.Background(), updated)
 
-	case theme.MessagesLoadedMsg:
+	case core.MessagesLoaded:
 		jid := m.resolveConversationJID(msg.ChatJID.String())
 		m.mergeAliasChatCache(jid)
 		// Merge (don't overwrite): history-sync batches can arrive after live
@@ -287,7 +288,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatView.SetChat(jid, conv.IsGroup, merged)
 		}
 
-	case theme.HistorySyncCompleteMsg:
+	case core.HistorySyncComplete:
 		m.statusBar.ClearMessage()
 		// Contacts and groups are populated by now; re-resolve any names that are
 		// still showing as raw JIDs (e.g. LID-addressed chats synced after connect).
@@ -312,13 +313,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.selectChat(msg.JID)
 
 	// --- Messages ---
-	case theme.NewMessageMsg:
+	case core.NewMessage:
 		return m.handleNewMessage(msg.Message)
 
-	case theme.MessageSentMsg:
+	case core.MessageSent:
 		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "sent")
 
-	case theme.MessageSendFailedMsg:
+	case core.MessageSendFailed:
 		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, "failed")
 		errText := "Send failed"
 		if msg.Err != nil {
@@ -330,21 +331,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetMessage(errText)
 		cmds = append(cmds, clearStatusAfterDelay(4*time.Second))
 
-	case theme.MessageStatusMsg:
+	case core.MessageStatus:
 		m.setMessageStatus(msg.ChatJID.String(), msg.MessageID, msg.Status)
 
 	// --- Media ---
-	case theme.MediaDownloadedMsg:
+	case core.MediaDownloaded:
 		cmds = append(cmds, m.handleMediaDownloaded(msg))
 
-	case theme.MediaDownloadFailedMsg:
+	case core.MediaDownloadFailed:
 		cmds = append(cmds, m.handleMediaDownloadFailed(msg))
 
 	case chatview.MediaOpenMsg:
 		cmds = append(cmds, m.handleMediaOpen(msg.ChatJID, msg.MessageID))
 
 	// --- Typing indicators ---
-	case theme.TypingMsg:
+	case core.Typing:
 		if m.chatView.ChatJID() == msg.ChatJID.String() {
 			if msg.IsTyping {
 				m.titleBar.SetTyping(msg.Sender.User)
@@ -553,7 +554,7 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 
 // markChatRead sends read receipts for the newest unread incoming messages
 // (messages is ascending by time). Already-read history is not re-sent.
-func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message, unread int) {
+func (m *Model) markChatRead(jid string, isGroup bool, messages []core.Message, unread int) {
 	parsedJID, err := types.ParseJID(jid)
 	if err != nil || len(messages) == 0 || unread <= 0 {
 		return
@@ -597,7 +598,7 @@ func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message,
 
 // --- Message handlers ---
 
-func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
+func (m *Model) handleNewMessage(msg core.Message) (Model, tea.Cmd) {
 	jid := m.resolveConversationJID(msg.ChatJID)
 	msg.ChatJID = jid
 	m.mergeAliasChatCache(jid)
@@ -621,7 +622,7 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 		if name == "" {
 			name = jid
 		}
-		conv = theme.Conversation{
+		conv = core.Conversation{
 			JID:     jid,
 			Name:    name,
 			IsGroup: strings.HasSuffix(jid, "@g.us"),
@@ -650,7 +651,7 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 		m.chatView.AppendMessage(msg)
 		// The user is looking at this chat, so the message is read on arrival.
 		if !msg.IsFromMe {
-			m.markChatRead(jid, conv.IsGroup, []theme.Message{msg}, 1)
+			m.markChatRead(jid, conv.IsGroup, []core.Message{msg}, 1)
 		}
 	}
 	return *m, nil
@@ -684,7 +685,7 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 // handleMediaDownloaded updates the in-memory cache and store with the downloaded
 // path, invalidates the chatview thumbnail cache, and opens the media if this
 // download was triggered by a pending user open/play request.
-func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
+func (m *Model) handleMediaDownloaded(msg core.MediaDownloaded) tea.Cmd {
 	jid := m.resolveConversationJID(msg.ChatJID)
 	msgs := m.chatMessages[jid]
 	for i := range msgs {
@@ -717,7 +718,7 @@ func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
 // handleMediaDownloadFailed logs a failed download. If it was the one the user
 // is waiting to open, the pending open is dropped and the error is surfaced in
 // the status bar; background (sticker auto-download) failures are only logged.
-func (m *Model) handleMediaDownloadFailed(msg theme.MediaDownloadFailedMsg) tea.Cmd {
+func (m *Model) handleMediaDownloadFailed(msg core.MediaDownloadFailed) tea.Cmd {
 	if m.log != nil && msg.Err != nil {
 		m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
 	}
@@ -739,8 +740,8 @@ const stickerAutoDownloadCap = 10
 // stickersToAutoDownload returns up to limit stickers that still need their file
 // downloaded, newest first. msgs is time-ascending, so walking backwards favours
 // the stickers visible at the bottom of the chat.
-func stickersToAutoDownload(msgs []theme.Message, limit int) []theme.Message {
-	var out []theme.Message
+func stickersToAutoDownload(msgs []core.Message, limit int) []core.Message {
+	var out []core.Message
 	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
 		msg := msgs[i]
 		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
@@ -772,8 +773,8 @@ func (m *Model) handleMediaOpen(chatJID, msgID string) tea.Cmd {
 
 // addOutgoingMessage records an optimistic outgoing message in the cache, view,
 // store, and conversation preview, returning the message with its generated ID.
-func (m *Model) addOutgoingMessage(chatJID, id, content string) theme.Message {
-	msg := theme.Message{
+func (m *Model) addOutgoingMessage(chatJID, id, content string) core.Message {
+	msg := core.Message{
 		ID:        id,
 		ChatJID:   chatJID,
 		Content:   content,
@@ -913,9 +914,9 @@ func (m *Model) mergeAliasChatCache(canonical string) {
 // mergeMessages combines message lists into a single slice, de-duplicating by ID
 // (earlier lists win, so cached/live state isn't clobbered by history) and sorting
 // ascending by timestamp for display.
-func mergeMessages(lists ...[]theme.Message) []theme.Message {
+func mergeMessages(lists ...[]core.Message) []core.Message {
 	seen := make(map[string]struct{})
-	var out []theme.Message
+	var out []core.Message
 	for _, list := range lists {
 		for _, msg := range list {
 			if msg.ID != "" {
@@ -935,11 +936,11 @@ func mergeMessages(lists ...[]theme.Message) []theme.Message {
 
 // insertMessageSorted inserts msg into a time-ascending slice at the correct
 // position, so offline-replayed messages with older timestamps land in order.
-func insertMessageSorted(msgs []theme.Message, msg theme.Message) []theme.Message {
+func insertMessageSorted(msgs []core.Message, msg core.Message) []core.Message {
 	idx := sort.Search(len(msgs), func(i int) bool {
 		return msgs[i].Timestamp.After(msg.Timestamp)
 	})
-	msgs = append(msgs, theme.Message{})
+	msgs = append(msgs, core.Message{})
 	copy(msgs[idx+1:], msgs[idx:])
 	msgs[idx] = msg
 	return msgs

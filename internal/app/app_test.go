@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
-func ids(msgs []theme.Message) []string {
+func ids(msgs []core.Message) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.ID
@@ -20,11 +20,11 @@ func TestMergeMessagesDedupesAndSorts(t *testing.T) {
 	t2 := time.Unix(200, 0)
 	t3 := time.Unix(300, 0)
 
-	cache := []theme.Message{
+	cache := []core.Message{
 		{ID: "c", Timestamp: t3},
 		{ID: "b", Timestamp: t2, Content: "cache-b"},
 	}
-	stored := []theme.Message{
+	stored := []core.Message{
 		{ID: "a", Timestamp: t1},
 		{ID: "b", Timestamp: t2, Content: "stored-b"},
 	}
@@ -48,29 +48,29 @@ func TestMergeMessagesEmpty(t *testing.T) {
 }
 
 func TestInsertMessageSorted(t *testing.T) {
-	msgs := []theme.Message{
+	msgs := []core.Message{
 		{ID: "a", Timestamp: time.Unix(100, 0)},
 		{ID: "c", Timestamp: time.Unix(300, 0)},
 	}
 
-	msgs = insertMessageSorted(msgs, theme.Message{ID: "b", Timestamp: time.Unix(200, 0)})
+	msgs = insertMessageSorted(msgs, core.Message{ID: "b", Timestamp: time.Unix(200, 0)})
 	if got := ids(msgs); got[0] != "a" || got[1] != "b" || got[2] != "c" {
 		t.Errorf("after middle insert = %v, want [a b c]", got)
 	}
 
-	msgs = insertMessageSorted(msgs, theme.Message{ID: "z", Timestamp: time.Unix(50, 0)})
+	msgs = insertMessageSorted(msgs, core.Message{ID: "z", Timestamp: time.Unix(50, 0)})
 	if msgs[0].ID != "z" {
 		t.Errorf("oldest insert: first = %s, want z", msgs[0].ID)
 	}
 
-	msgs = insertMessageSorted(msgs, theme.Message{ID: "n", Timestamp: time.Unix(400, 0)})
+	msgs = insertMessageSorted(msgs, core.Message{ID: "n", Timestamp: time.Unix(400, 0)})
 	if msgs[len(msgs)-1].ID != "n" {
 		t.Errorf("newest insert: last = %s, want n", msgs[len(msgs)-1].ID)
 	}
 }
 
 func TestInsertMessageSortedIntoEmpty(t *testing.T) {
-	msgs := insertMessageSorted(nil, theme.Message{ID: "a", Timestamp: time.Unix(1, 0)})
+	msgs := insertMessageSorted(nil, core.Message{ID: "a", Timestamp: time.Unix(1, 0)})
 	if len(msgs) != 1 || msgs[0].ID != "a" {
 		t.Errorf("insert into empty = %v, want [a]", ids(msgs))
 	}

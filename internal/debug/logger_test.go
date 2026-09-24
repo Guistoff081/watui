@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func TestNewCreatesLogFile(t *testing.T) {
@@ -107,8 +107,8 @@ func TestLogMsgRecordsAppMessage(t *testing.T) {
 	}
 	defer l.Close()
 
-	l.LogMsg(theme.NewMessageMsg{
-		Message: theme.Message{
+	l.LogMsg(core.NewMessage{
+		Message: core.Message{
 			ID:      "ABC123",
 			ChatJID: "1234567890@s.whatsapp.net",
 		},
@@ -122,7 +122,7 @@ func TestLogMsgRecordsAppMessage(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "NewMessageMsg") {
+	if !strings.Contains(content, "core.NewMessage") {
 		t.Errorf("log file missing message type, got: %q", content)
 	}
 	if !strings.Contains(content, "ABC123") {
@@ -137,7 +137,7 @@ func TestNilLoggerIsNoop(t *testing.T) {
 	l.Warn("test")
 	l.Error(errors.New("err"), "ctx")
 	l.LogPanic("panic")
-	l.LogMsg(theme.QRCodeMsg{Code: "x"})
+	l.LogMsg(core.QRCode{Code: "x"})
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close() on nil logger error = %v", err)
 	}

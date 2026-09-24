@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -22,7 +22,7 @@ func newTestStore(t *testing.T) *Store {
 
 func seedConversation(t *testing.T, s *Store, jid string) {
 	t.Helper()
-	if err := s.UpsertConversation(context.Background(), theme.Conversation{JID: jid, Name: "Test"}); err != nil {
+	if err := s.UpsertConversation(context.Background(), core.Conversation{JID: jid, Name: "Test"}); err != nil {
 		t.Fatalf("UpsertConversation() error = %v", err)
 	}
 }
@@ -34,9 +34,9 @@ func TestGetMessagesReturnsRecentInAscendingOrder(t *testing.T) {
 	seedConversation(t, s, jid)
 
 	base := time.Unix(1_000_000, 0)
-	var msgs []theme.Message
+	var msgs []core.Message
 	for i := 0; i < 10; i++ {
-		msgs = append(msgs, theme.Message{
+		msgs = append(msgs, core.Message{
 			ID:        fmt.Sprintf("m%d", i),
 			ChatJID:   jid,
 			Content:   fmt.Sprintf("c%d", i),
@@ -70,7 +70,7 @@ func TestInsertMessageIgnoresDuplicates(t *testing.T) {
 	jid := "g@g.us"
 	seedConversation(t, s, jid)
 
-	m := theme.Message{ID: "x", ChatJID: jid, Content: "first", Timestamp: time.Unix(100, 0)}
+	m := core.Message{ID: "x", ChatJID: jid, Content: "first", Timestamp: time.Unix(100, 0)}
 	if err := s.InsertMessage(ctx, m); err != nil {
 		t.Fatalf("InsertMessage() error = %v", err)
 	}
@@ -98,7 +98,7 @@ func TestUpdateMessageStatus(t *testing.T) {
 	jid := "123@s.whatsapp.net"
 	seedConversation(t, s, jid)
 
-	m := theme.Message{ID: "m1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(1, 0), Status: "sending"}
+	m := core.Message{ID: "m1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(1, 0), Status: "sending"}
 	if err := s.InsertMessage(ctx, m); err != nil {
 		t.Fatalf("InsertMessage() error = %v", err)
 	}
@@ -119,9 +119,9 @@ func TestGetMessagesBeforeReturnsAscending(t *testing.T) {
 	seedConversation(t, s, jid)
 
 	base := time.Unix(1_000_000, 0)
-	var msgs []theme.Message
+	var msgs []core.Message
 	for i := 0; i < 6; i++ {
-		msgs = append(msgs, theme.Message{
+		msgs = append(msgs, core.Message{
 			ID:        fmt.Sprintf("m%d", i),
 			ChatJID:   jid,
 			Timestamp: base.Add(time.Duration(i) * time.Minute),
@@ -152,13 +152,13 @@ func TestUpsertConversationKeepsNameAndAdvancesPreview(t *testing.T) {
 	ctx := context.Background()
 	jid := "123@s.whatsapp.net"
 
-	first := theme.Conversation{JID: jid, Name: "Alice", LastMessage: "old", LastMsgTime: time.Unix(100, 0)}
+	first := core.Conversation{JID: jid, Name: "Alice", LastMessage: "old", LastMsgTime: time.Unix(100, 0)}
 	if err := s.UpsertConversation(ctx, first); err != nil {
 		t.Fatalf("UpsertConversation() error = %v", err)
 	}
 
 	// Empty name + newer message should keep the name but advance the preview.
-	update := theme.Conversation{JID: jid, Name: "", LastMessage: "new", LastMsgTime: time.Unix(200, 0)}
+	update := core.Conversation{JID: jid, Name: "", LastMessage: "new", LastMsgTime: time.Unix(200, 0)}
 	if err := s.UpsertConversation(ctx, update); err != nil {
 		t.Fatalf("UpsertConversation() update error = %v", err)
 	}
@@ -183,10 +183,10 @@ func TestUpsertConversationDoesNotRegressPreviewWithOlder(t *testing.T) {
 	ctx := context.Background()
 	jid := "123@s.whatsapp.net"
 
-	if err := s.UpsertConversation(ctx, theme.Conversation{JID: jid, LastMessage: "new", LastMsgTime: time.Unix(200, 0)}); err != nil {
+	if err := s.UpsertConversation(ctx, core.Conversation{JID: jid, LastMessage: "new", LastMsgTime: time.Unix(200, 0)}); err != nil {
 		t.Fatalf("UpsertConversation() error = %v", err)
 	}
-	if err := s.UpsertConversation(ctx, theme.Conversation{JID: jid, LastMessage: "old", LastMsgTime: time.Unix(100, 0)}); err != nil {
+	if err := s.UpsertConversation(ctx, core.Conversation{JID: jid, LastMessage: "old", LastMsgTime: time.Unix(100, 0)}); err != nil {
 		t.Fatalf("UpsertConversation() error = %v", err)
 	}
 
@@ -201,7 +201,7 @@ func TestClearUnread(t *testing.T) {
 	ctx := context.Background()
 	jid := "123@s.whatsapp.net"
 
-	if err := s.UpsertConversation(ctx, theme.Conversation{JID: jid, UnreadCount: 5, LastMsgTime: time.Unix(1, 0)}); err != nil {
+	if err := s.UpsertConversation(ctx, core.Conversation{JID: jid, UnreadCount: 5, LastMsgTime: time.Unix(1, 0)}); err != nil {
 		t.Fatalf("UpsertConversation() error = %v", err)
 	}
 	if err := s.ClearUnread(ctx, jid); err != nil {
@@ -219,7 +219,7 @@ func TestInsertMessageRoundTripsMediaColumns(t *testing.T) {
 	jid := "123@s.whatsapp.net"
 	seedConversation(t, s, jid)
 
-	msg := theme.Message{
+	msg := core.Message{
 		ID:            "med1",
 		ChatJID:       jid,
 		Timestamp:     time.Unix(500, 0),
@@ -265,7 +265,7 @@ func TestUpdateMessageMediaPath(t *testing.T) {
 	jid := "123@s.whatsapp.net"
 	seedConversation(t, s, jid)
 
-	msg := theme.Message{ID: "m1", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(1, 0)}
+	msg := core.Message{ID: "m1", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(1, 0)}
 	if err := s.InsertMessage(ctx, msg); err != nil {
 		t.Fatalf("InsertMessage() error = %v", err)
 	}
@@ -282,9 +282,9 @@ func TestGetAllConversationsOrdersPinnedThenRecent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	_ = s.UpsertConversation(ctx, theme.Conversation{JID: "a", LastMsgTime: time.Unix(300, 0)})
-	_ = s.UpsertConversation(ctx, theme.Conversation{JID: "b", LastMsgTime: time.Unix(100, 0), IsPinned: true})
-	_ = s.UpsertConversation(ctx, theme.Conversation{JID: "c", LastMsgTime: time.Unix(200, 0)})
+	_ = s.UpsertConversation(ctx, core.Conversation{JID: "a", LastMsgTime: time.Unix(300, 0)})
+	_ = s.UpsertConversation(ctx, core.Conversation{JID: "b", LastMsgTime: time.Unix(100, 0), IsPinned: true})
+	_ = s.UpsertConversation(ctx, core.Conversation{JID: "c", LastMsgTime: time.Unix(200, 0)})
 
 	convs, err := s.GetAllConversations(ctx)
 	if err != nil {

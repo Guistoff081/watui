@@ -8,7 +8,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 // Store is the app-level SQLite store for conversations and messages.
@@ -39,7 +39,7 @@ func (s *Store) Close() error {
 
 // UpsertConversation creates or updates a conversation.
 // Only updates fields that are non-zero to avoid overwriting good data with empty data.
-func (s *Store) UpsertConversation(ctx context.Context, conv theme.Conversation) error {
+func (s *Store) UpsertConversation(ctx context.Context, conv core.Conversation) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO conversations (jid, name, is_group, last_message, last_msg_time, unread_count, is_pinned)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -79,7 +79,7 @@ func (s *Store) ClearUnread(ctx context.Context, jid string) error {
 }
 
 // GetAllConversations returns all conversations ordered by pinned first, then last message time.
-func (s *Store) GetAllConversations(ctx context.Context) ([]theme.Conversation, error) {
+func (s *Store) GetAllConversations(ctx context.Context) ([]core.Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT jid, name, is_group, last_message, last_msg_time, unread_count, is_pinned
 		FROM conversations
@@ -90,9 +90,9 @@ func (s *Store) GetAllConversations(ctx context.Context) ([]theme.Conversation, 
 	}
 	defer rows.Close()
 
-	var convs []theme.Conversation
+	var convs []core.Conversation
 	for rows.Next() {
-		var conv theme.Conversation
+		var conv core.Conversation
 		var lastMsgTime int64
 		if err := rows.Scan(&conv.JID, &conv.Name, &conv.IsGroup, &conv.LastMessage, &lastMsgTime, &conv.UnreadCount, &conv.IsPinned); err != nil {
 			return nil, err
@@ -106,7 +106,7 @@ func (s *Store) GetAllConversations(ctx context.Context) ([]theme.Conversation, 
 }
 
 // InsertMessages inserts a batch of messages, ignoring duplicates.
-func (s *Store) InsertMessages(ctx context.Context, messages []theme.Message) error {
+func (s *Store) InsertMessages(ctx context.Context, messages []core.Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -143,7 +143,7 @@ func (s *Store) InsertMessages(ctx context.Context, messages []theme.Message) er
 }
 
 // InsertMessage inserts a single message, ignoring if it already exists.
-func (s *Store) InsertMessage(ctx context.Context, msg theme.Message) error {
+func (s *Store) InsertMessage(ctx context.Context, msg core.Message) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
@@ -179,7 +179,7 @@ func blobOrNil(b []byte) interface{} {
 
 // GetMessagesForChats returns the most recent messages across one or more chat JID
 // aliases (e.g. phone number and LID for the same 1:1 chat), oldest-first.
-func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limit int) ([]theme.Message, error) {
+func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limit int) ([]core.Message, error) {
 	if len(chatJIDs) == 0 {
 		return nil, nil
 	}
@@ -212,7 +212,7 @@ func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limi
 	}
 	defer rows.Close()
 
-	var msgs []theme.Message
+	var msgs []core.Message
 	for rows.Next() {
 		msg, err := scanMessage(rows)
 		if err != nil {
@@ -232,7 +232,7 @@ func (s *Store) GetMessagesForChats(ctx context.Context, chatJIDs []string, limi
 
 // GetMessages returns the most recent messages for a chat (up to limit),
 // ordered by timestamp ascending (oldest first) for display.
-func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]theme.Message, error) {
+func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]core.Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
 		       media_type, media_path, mime_type, file_name, thumbnail,
@@ -248,7 +248,7 @@ func (s *Store) GetMessages(ctx context.Context, chatJID string, limit int) ([]t
 	}
 	defer rows.Close()
 
-	var msgs []theme.Message
+	var msgs []core.Message
 	for rows.Next() {
 		msg, err := scanMessage(rows)
 		if err != nil {
@@ -280,9 +280,9 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanMessage scans a full message row (all 21 columns) into a theme.Message.
-func scanMessage(row rowScanner) (theme.Message, error) {
-	var msg theme.Message
+// scanMessage scans a full message row (all 21 columns) into a core.Message.
+func scanMessage(row rowScanner) (core.Message, error) {
+	var msg core.Message
 	var ts int64
 	err := row.Scan(
 		&msg.ID, &msg.ChatJID, &msg.SenderJID, &msg.SenderName,
@@ -292,7 +292,7 @@ func scanMessage(row rowScanner) (theme.Message, error) {
 		&msg.DirectPath, &msg.MediaKey, &msg.FileSHA256, &msg.FileEncSHA256,
 	)
 	if err != nil {
-		return theme.Message{}, err
+		return core.Message{}, err
 	}
 	msg.Timestamp = time.Unix(ts, 0)
 	return msg, nil
@@ -300,7 +300,7 @@ func scanMessage(row rowScanner) (theme.Message, error) {
 
 // GetMessagesBefore returns up to limit messages for chatJID with timestamps
 // strictly before before, ordered oldest-first (for prepending to a loaded history).
-func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before time.Time, limit int) ([]theme.Message, error) {
+func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before time.Time, limit int) ([]core.Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, status,
 		       media_type, media_path, mime_type, file_name, thumbnail,
@@ -316,7 +316,7 @@ func (s *Store) GetMessagesBefore(ctx context.Context, chatJID string, before ti
 	}
 	defer rows.Close()
 
-	var msgs []theme.Message
+	var msgs []core.Message
 	for rows.Next() {
 		msg, err := scanMessage(rows)
 		if err != nil {

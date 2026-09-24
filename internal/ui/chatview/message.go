@@ -7,13 +7,14 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/theme"
 )
 
 // renderMessage renders a single message bubble. isSelected adds a highlight
 // border when the chatview selection cursor is on this message. thumbCache is
 // consulted (and populated) for expensive thumbnail renders.
-func renderMessage(msg theme.Message, width int, isGroup bool, isSelected bool, thumbCache map[string]string) string {
+func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, thumbCache map[string]string) string {
 	maxBubbleW := int(float64(width) * 0.7)
 	if maxBubbleW < 20 {
 		maxBubbleW = 20
@@ -70,7 +71,7 @@ func renderMessage(msg theme.Message, width int, isGroup bool, isSelected bool, 
 }
 
 // renderMediaBody returns the inline representation of a media message body.
-func renderMediaBody(msg theme.Message, maxW int, thumbCache map[string]string) string {
+func renderMediaBody(msg core.Message, maxW int, thumbCache map[string]string) string {
 	switch msg.MediaType {
 	case "image", "video", "gif", "sticker":
 		return renderImageBody(msg, maxW, thumbCache)
@@ -83,7 +84,7 @@ func renderMediaBody(msg theme.Message, maxW int, thumbCache map[string]string) 
 	}
 }
 
-func renderImageBody(msg theme.Message, maxW int, thumbCache map[string]string) string {
+func renderImageBody(msg core.Message, maxW int, thumbCache map[string]string) string {
 	var b strings.Builder
 
 	// Thumbnail: prefer embedded thumbnail (images/videos) over downloaded file (stickers).
@@ -131,7 +132,7 @@ func renderImageBody(msg theme.Message, maxW int, thumbCache map[string]string) 
 	return b.String()
 }
 
-func renderAudioBody(msg theme.Message) string {
+func renderAudioBody(msg core.Message) string {
 	var b strings.Builder
 	icon := "🎵"
 	if msg.MediaType == "voice" {
@@ -144,7 +145,7 @@ func renderAudioBody(msg theme.Message) string {
 	return b.String()
 }
 
-func renderDocumentBody(msg theme.Message) string {
+func renderDocumentBody(msg core.Message) string {
 	var b strings.Builder
 	name := msg.FileName
 	if name == "" {
@@ -160,7 +161,7 @@ func renderDocumentBody(msg theme.Message) string {
 	return b.String()
 }
 
-func mediaTag(msg theme.Message) string {
+func mediaTag(msg core.Message) string {
 	switch msg.MediaType {
 	case "image":
 		return "[image]"

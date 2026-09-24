@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 // Logger writes development debug output to a file. All methods are no-ops when
@@ -136,48 +136,38 @@ func isNoisyMsg(msg tea.Msg) bool {
 
 func summarizeMsg(msg tea.Msg) []any {
 	switch m := msg.(type) {
-	case theme.NewMessageMsg:
+	case core.NewMessage:
 		return []any{"chat", m.Message.ChatJID, "id", m.Message.ID, "from_me", m.Message.IsFromMe}
-	case theme.MessageSentMsg:
+	case core.MessageSent:
 		return []any{"chat", m.ChatJID.String(), "id", m.MessageID}
-	case theme.MessageSendFailedMsg:
+	case core.MessageSendFailed:
 		attrs := []any{"chat", m.ChatJID.String(), "id", m.MessageID}
 		if m.Err != nil {
 			attrs = append(attrs, "error", m.Err.Error())
 		}
 		return attrs
-	case theme.MessageStatusMsg:
+	case core.MessageStatus:
 		return []any{"chat", m.ChatJID.String(), "id", m.MessageID, "status", m.Status}
-	case theme.ConnectedMsg:
+	case core.Connected:
 		return []any{"jid", m.JID.String()}
-	case theme.DisconnectedMsg:
+	case core.Disconnected:
 		attrs := []any{}
 		if m.Err != nil {
 			attrs = append(attrs, "error", m.Err.Error())
 		}
 		return attrs
-	case theme.LoginSuccessMsg:
+	case core.LoginSuccess:
 		return []any{"jid", m.JID.String()}
-	case theme.LoginFailedMsg:
+	case core.LoginFailed:
 		if m.Err != nil {
 			return []any{"error", m.Err.Error()}
 		}
-	case theme.QRCodeMsg:
+	case core.QRCode:
 		return []any{"code_len", len(m.Code)}
-	case theme.TypingMsg:
+	case core.Typing:
 		return []any{"chat", m.ChatJID.String(), "sender", m.Sender.String(), "typing", m.IsTyping}
-	case theme.ConversationListMsg:
-		return []any{"count", len(m.Conversations)}
-	case theme.MessagesLoadedMsg:
+	case core.MessagesLoaded:
 		return []any{"chat", m.ChatJID.String(), "count", len(m.Messages)}
-	case theme.ChatSelectedMsg:
-		return []any{"jid", m.JID.String()}
-	case theme.ErrorMsg:
-		attrs := []any{"context", m.Context}
-		if m.Err != nil {
-			attrs = append(attrs, "error", m.Err.Error())
-		}
-		return attrs
 	case error:
 		return []any{"error", m.Error()}
 	}

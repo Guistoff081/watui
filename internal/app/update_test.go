@@ -7,10 +7,10 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
-func msgIDs(msgs []theme.Message) []string {
+func msgIDs(msgs []core.Message) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.ID
@@ -21,10 +21,10 @@ func msgIDs(msgs []theme.Message) []string {
 func TestHandleNewMessageDeduplicates(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "123@s.whatsapp.net"
-	_ = s.UpsertConversation(context.Background(), theme.Conversation{JID: jid})
-	m.conversations[jid] = theme.Conversation{JID: jid}
+	_ = s.UpsertConversation(context.Background(), core.Conversation{JID: jid})
+	m.conversations[jid] = core.Conversation{JID: jid}
 
-	msg := theme.Message{ID: "m1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(100, 0)}
+	msg := core.Message{ID: "m1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(100, 0)}
 	m, _ = m.handleNewMessage(msg)
 	m, _ = m.handleNewMessage(msg) // duplicate dispatch (e.g. group pkmsg+skmsg)
 
@@ -36,12 +36,12 @@ func TestHandleNewMessageDeduplicates(t *testing.T) {
 func TestHandleNewMessageOrdersOfflineReplay(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "g@g.us"
-	_ = s.UpsertConversation(context.Background(), theme.Conversation{JID: jid})
-	m.conversations[jid] = theme.Conversation{JID: jid}
+	_ = s.UpsertConversation(context.Background(), core.Conversation{JID: jid})
+	m.conversations[jid] = core.Conversation{JID: jid}
 
 	// Newest arrives first, then an older (offline-replayed) message.
-	m, _ = m.handleNewMessage(theme.Message{ID: "new", ChatJID: jid, Content: "newest", Timestamp: time.Unix(300, 0)})
-	m, _ = m.handleNewMessage(theme.Message{ID: "old", ChatJID: jid, Content: "older", Timestamp: time.Unix(100, 0)})
+	m, _ = m.handleNewMessage(core.Message{ID: "new", ChatJID: jid, Content: "newest", Timestamp: time.Unix(300, 0)})
+	m, _ = m.handleNewMessage(core.Message{ID: "old", ChatJID: jid, Content: "older", Timestamp: time.Unix(100, 0)})
 
 	got := m.chatMessages[jid]
 	if len(got) != 2 || got[0].ID != "old" || got[1].ID != "new" {
@@ -59,15 +59,15 @@ func TestSelectChatMergesStoreAndCache(t *testing.T) {
 	m, s := newTestModel(t)
 	ctx := context.Background()
 	jid := "123@s.whatsapp.net"
-	_ = s.UpsertConversation(ctx, theme.Conversation{JID: jid})
-	_ = s.InsertMessages(ctx, []theme.Message{
+	_ = s.UpsertConversation(ctx, core.Conversation{JID: jid})
+	_ = s.InsertMessages(ctx, []core.Message{
 		{ID: "s1", ChatJID: jid, Timestamp: time.Unix(100, 0)},
 		{ID: "s2", ChatJID: jid, Timestamp: time.Unix(200, 0)},
 	})
 
-	m.conversations[jid] = theme.Conversation{JID: jid}
+	m.conversations[jid] = core.Conversation{JID: jid}
 	// A live message present only in the in-memory cache.
-	m.chatMessages[jid] = []theme.Message{{ID: "c1", ChatJID: jid, Timestamp: time.Unix(300, 0)}}
+	m.chatMessages[jid] = []core.Message{{ID: "c1", ChatJID: jid, Timestamp: time.Unix(300, 0)}}
 
 	m, _ = m.selectChat(jid)
 
@@ -86,16 +86,16 @@ func TestSelectChatMergesStoreAndCache(t *testing.T) {
 func TestMessagesLoadedMergesNotOverwrites(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "123@s.whatsapp.net"
-	_ = s.UpsertConversation(context.Background(), theme.Conversation{JID: jid})
-	m.conversations[jid] = theme.Conversation{JID: jid}
+	_ = s.UpsertConversation(context.Background(), core.Conversation{JID: jid})
+	m.conversations[jid] = core.Conversation{JID: jid}
 
 	// A live message already cached.
-	m.chatMessages[jid] = []theme.Message{{ID: "live", ChatJID: jid, Timestamp: time.Unix(500, 0)}}
+	m.chatMessages[jid] = []core.Message{{ID: "live", ChatJID: jid, Timestamp: time.Unix(500, 0)}}
 
 	parsed, _ := types.ParseJID(jid)
-	updated, _ := m.Update(theme.MessagesLoadedMsg{
+	updated, _ := m.Update(core.MessagesLoaded{
 		ChatJID: parsed,
-		Messages: []theme.Message{
+		Messages: []core.Message{
 			{ID: "hist1", ChatJID: jid, Timestamp: time.Unix(100, 0)},
 			{ID: "hist2", ChatJID: jid, Timestamp: time.Unix(200, 0)},
 		},

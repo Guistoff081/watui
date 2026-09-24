@@ -4,27 +4,27 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func TestItemTitleFallsBackToJID(t *testing.T) {
-	noName := NewItem(theme.Conversation{JID: "123@s.whatsapp.net"})
+	noName := NewItem(core.Conversation{JID: "123@s.whatsapp.net"})
 	if got := noName.Title(); got != "123@s.whatsapp.net" {
 		t.Errorf("Title() = %q, want JID fallback", got)
 	}
-	named := NewItem(theme.Conversation{JID: "123@s.whatsapp.net", Name: "Alice"})
+	named := NewItem(core.Conversation{JID: "123@s.whatsapp.net", Name: "Alice"})
 	if got := named.Title(); got != "Alice" {
 		t.Errorf("Title() = %q, want Alice", got)
 	}
 }
 
 func TestItemDescriptionTruncates(t *testing.T) {
-	short := NewItem(theme.Conversation{LastMessage: "hello"})
+	short := NewItem(core.Conversation{LastMessage: "hello"})
 	if got := short.Description(); got != "hello" {
 		t.Errorf("Description() = %q, want hello", got)
 	}
 
-	long := NewItem(theme.Conversation{LastMessage: strings.Repeat("a", 60)})
+	long := NewItem(core.Conversation{LastMessage: strings.Repeat("a", 60)})
 	got := long.Description()
 	if !strings.HasSuffix(got, "...") {
 		t.Errorf("Description() = %q, want truncated with ellipsis", got)
@@ -37,14 +37,14 @@ func TestItemDescriptionTruncates(t *testing.T) {
 func TestItemFormatUnread(t *testing.T) {
 	cases := map[int]string{0: "", 5: "5", 99: "99", 100: "99+", 250: "99+"}
 	for count, want := range cases {
-		if got := NewItem(theme.Conversation{UnreadCount: count}).FormatUnread(); got != want {
+		if got := NewItem(core.Conversation{UnreadCount: count}).FormatUnread(); got != want {
 			t.Errorf("FormatUnread(%d) = %q, want %q", count, got, want)
 		}
 	}
 }
 
 func TestItemFormatTimeZero(t *testing.T) {
-	if got := NewItem(theme.Conversation{}).FormatTime(); got != "" {
+	if got := NewItem(core.Conversation{}).FormatTime(); got != "" {
 		t.Errorf("FormatTime() = %q, want empty for zero time", got)
 	}
 }

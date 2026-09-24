@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func TestIsDisplayable(t *testing.T) {
@@ -369,9 +369,9 @@ func TestHandleMessageSkipsNonDisplayable(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("handleMessage() sent %d msgs, want 1", len(sent))
 			}
-			nm, ok := sent[0].(theme.NewMessageMsg)
+			nm, ok := sent[0].(core.NewMessage)
 			if !ok {
-				t.Fatalf("handleMessage() sent %T, want theme.NewMessageMsg", sent[0])
+				t.Fatalf("handleMessage() sent %T, want core.NewMessage", sent[0])
 			}
 			if nm.Message.Content != "hi" || nm.Message.ChatJID != group.String() {
 				t.Errorf("handleMessage() message = %+v", nm.Message)

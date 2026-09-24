@@ -37,14 +37,16 @@ watui/
 │   ├── app/
 │   │   ├── app.go                 # Root Bubble Tea model (orchestrator)
 │   │   └── *_test.go              # merge/sort, alias JID, update handlers
-│   ├── theme/                     # Pacote central: modelos, tea.Msg, estilos, keymaps
-│   │   ├── models.go              # Conversation, Message structs + todos tea.Msg types
+│   ├── core/                      # Domínio sem UI: modelos + eventos
+│   │   ├── models.go              # Conversation, Message, PreviewText()
+│   │   └── events.go              # core.Event (NewMessage, Connected, MessageSent…)
+│   ├── theme/                     # Estilos e keymaps da UI
 │   │   ├── styles.go              # Lipgloss styles compartilhados
 │   │   └── keymap.go              # Keybindings compartilhados
 │   ├── whatsapp/
 │   │   ├── client.go              # whatsmeow wrapper: connect, send, media download/open
 │   │   ├── jid.go                 # Canonicalização LID ↔ PN
-│   │   └── events.go              # whatsmeow events → theme.*Msg bridge
+│   │   └── events.go              # whatsmeow events → core events
 │   ├── ui/
 │   │   ├── auth/
 │   │   │   ├── qr.go              # QR code auth screen (half-block + sextant rendering)
@@ -88,12 +90,12 @@ O desafio central é conectar o modelo event-driven do whatsmeow com o loop Mode
 Solução: `p.Send()` como bridge.
 
 ```
-whatsmeow WebSocket → events.go handler → c.sendMsg(theme.Msg) → p.Send() → tea.Program loop → app.Update()
+whatsmeow WebSocket → events.go handler → c.sendMsg(core.Event) → p.Send() → tea.Program loop → app.Update()
 ```
 
 - `whatsapp.Client` recebe `p.Send` como callback após criação do programa.
-- Cada evento whatsmeow é traduzido para um `tea.Msg` tipado em `theme/`.
-- O `internal/theme/` não importa nada do restante do projeto (evita import cycles).
+- Cada evento whatsmeow é traduzido para um evento de domínio em `core/` (struct simples, recebida pelo app como `tea.Msg`).
+- O `internal/core/` não importa nada do restante do projeto (evita import cycles).
 - O root `app.Model` roteia mensagens para os child models.
 
 #### Sequência de startup
@@ -159,7 +161,7 @@ QR Auth Screen: tela centralizada com QR em half-block chars (ou sextant blocks 
 ### Data Models
 
 ```go
-// em internal/theme/models.go
+// em internal/core/models.go
 
 type Conversation struct {
     JID, Name    string
@@ -256,7 +258,7 @@ SQLite schema: tabela `conversations` (PK: jid) + tabela `messages` (PK: id+chat
 #### 🟡 Fase 7: Renderização de Media (parcial)
 
 Entregue:
-- Metadados de media em `theme.Message` + migração idempotente das colunas em `messages`
+- Metadados de media em `Message` + migração idempotente das colunas em `messages`
 - `extractMedia()` para image/video/gif/audio/voice/document/sticker (live + history sync)
 - Thumbnails embutidos (JPEG) renderizados em half-blocks 24-bit; figurinhas WebP estáticas decodificadas
 - Download on-demand via `DownloadMediaWithPath` com cache em `data/media/` (0o700/0o600, IDs sanitizados)
@@ -270,7 +272,7 @@ Pendente (movido para Fase 13):
 
 ---
 
-### 🔜 Fase 7.5: Estabilização (bugs + testes)
+### ✅ Fase 7.5: Estabilização (bugs + testes)
 
 **Objetivo:** corrigir bugs visíveis e criar base de testes antes de refatorar a arquitetura. Entregue como PRs empilhados (`phase-7.5/*`).
 
@@ -307,6 +309,12 @@ Backlog conhecido (não incluído na 7.5):
 - Metas de cobertura: `core` ≥ 80%, `whatsapp` (conversão de eventos) ≥ 60%, `app` ≥ 50%
 
 **Verificação:** `go test ./...` roda sem terminal nem rede; fluxo de mensagem testado ponta a ponta com fakes.
+
+PRs empilhados (`phase-8/*`):
+1. `01-core-package` — modelos + eventos de `theme` → `internal/core` (sufixo `Msg` removido, interface selada `core.Event`); CI roda em PRs empilhados e checa gofmt
+2. `02-whatsapp-sync` ∥ `03-core-chats` (paralelos) — `whatsapp` sem `tea` (API síncrona + adapter `tea.Cmd` no `app`); motor de estado `core.Chats` puro com efeitos
+3. `04-async-io` — interface de store, SQLite e recibos fora do `Update()` via `tea.Cmd`, erros logados
+4. `05-split-app` — `app.go` quebrado por domínio + metas de cobertura + docs de arquitetura
 
 ---
 
