@@ -188,3 +188,30 @@ func stripANSI(s string) string {
 	}
 	return string(out)
 }
+
+// SetChat must not alias the caller's slice: the app passes the core.Chats
+// cache, and both sides later append/insert, which would otherwise corrupt
+// each other through a shared backing array.
+func TestSetChatDoesNotAliasCallerSlice(t *testing.T) {
+	jid := "123@s.whatsapp.net"
+	src := make([]core.Message, 2, 8) // spare capacity invites aliasing
+	src[0] = core.Message{ID: "a", ChatJID: jid, Timestamp: time.Unix(100, 0)}
+	src[1] = core.Message{ID: "c", ChatJID: jid, Timestamp: time.Unix(300, 0)}
+
+	m := New()
+	m.SetSize(80, 24)
+	m.SetChat(jid, false, src)
+
+	m.AppendMessage(core.Message{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)})
+	m.UpdateMessageStatus("a", "read")
+
+	if got := msgIDs(src[:cap(src)][:3]); got[2] != "" {
+		t.Errorf("caller backing array written by view: %v", got)
+	}
+	if src[0].Status == "read" {
+		t.Errorf("caller message mutated by UpdateMessageStatus")
+	}
+	if got := msgIDs(m.messages); len(got) != 3 || got[1] != "b" {
+		t.Errorf("view messages = %v, want [a b c]", got)
+	}
+}

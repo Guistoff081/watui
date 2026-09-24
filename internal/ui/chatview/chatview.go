@@ -85,7 +85,9 @@ func (m Model) Focused() bool { return m.focused }
 func (m *Model) SetChat(jid string, isGroup bool, messages []core.Message) {
 	m.chatJID = jid
 	m.isGroup = isGroup
-	m.messages = messages
+	// Copy: callers pass their cache slice, and the view appends, inserts and
+	// updates status in place — sharing the backing array would corrupt both.
+	m.messages = append([]core.Message(nil), messages...)
 	m.atBottom = true
 	m.loading = false
 	m.noMore = false
@@ -156,7 +158,7 @@ func (m *Model) PrependMessages(msgs []core.Message) {
 		m.selected += len(msgs)
 	}
 
-	m.messages = append(msgs, m.messages...)
+	m.messages = append(append([]core.Message(nil), msgs...), m.messages...)
 	savedOffset := m.viewport.YOffset
 	m.rebuildContent()
 	m.viewport.SetYOffset(savedOffset + addedLines)
