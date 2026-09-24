@@ -275,7 +275,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if conv, ok := m.conversations[jid]; ok && latest.Timestamp.After(conv.LastMsgTime) {
-				conv.LastMessage = latest.Content
+				conv.LastMessage = latest.PreviewText()
 				conv.LastMsgTime = latest.Timestamp
 				m.conversations[jid] = conv
 				m.chatList.UpsertConversation(conv)
@@ -523,7 +523,7 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	if len(messages) > 0 {
 		last := messages[len(messages)-1]
 		if last.Timestamp.After(conv.LastMsgTime) {
-			conv.LastMessage = last.Content
+			conv.LastMessage = last.PreviewText()
 			conv.LastMsgTime = last.Timestamp
 			m.conversations[jid] = conv
 			m.chatList.UpsertConversation(conv)
@@ -531,11 +531,16 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 		}
 	}
 
+	// Capture the unread count before clearing it: it bounds how many of the
+	// newest incoming messages still need a read receipt.
+	unread := conv.UnreadCount
+	conv.UnreadCount = 0
+	m.conversations[jid] = conv
 	m.chatList.ClearUnread(jid)
 	_ = m.store.ClearUnread(context.Background(), jid)
 
-	// Send read receipts to WhatsApp for received messages.
-	m.markChatRead(jid, conv.IsGroup, messages)
+	// Send read receipts to WhatsApp for the messages that were unread.
+	m.markChatRead(jid, conv.IsGroup, messages, unread)
 
 	// Auto-download sticker files for the visible window (stickers have no embedded
 	// thumbnail, so they need the full file before a half-block preview can render).
@@ -554,11 +559,23 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	return *m, tea.Batch(append(stickerCmds, focusCmd)...)
 }
 
-func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message) {
+// markChatRead sends read receipts for the newest unread incoming messages
+// (messages is ascending by time). Already-read history is not re-sent.
+func (m *Model) markChatRead(jid string, isGroup bool, messages []theme.Message, unread int) {
 	parsedJID, err := types.ParseJID(jid)
-	if err != nil || len(messages) == 0 {
+	if err != nil || len(messages) == 0 || unread <= 0 {
 		return
 	}
+
+	// Walk back from the newest message to find where the unread tail begins.
+	start := len(messages)
+	for n := 0; start > 0 && n < unread; {
+		start--
+		if !messages[start].IsFromMe {
+			n++
+		}
+	}
+	messages = messages[start:]
 
 	if isGroup {
 		// Group chats require per-sender receipts.
@@ -625,10 +642,11 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 	if ok {
 		// Don't let an older (offline-replayed) message overwrite a newer preview.
 		if msg.Timestamp.After(conv.LastMsgTime) {
-			conv.LastMessage = msg.Content
+			conv.LastMessage = msg.PreviewText()
 			conv.LastMsgTime = msg.Timestamp
 		}
-		if m.resolveConversationJID(m.chatView.ChatJID()) != jid {
+		// Own messages (sent from another device) are never unread.
+		if !msg.IsFromMe && m.resolveConversationJID(m.chatView.ChatJID()) != jid {
 			conv.UnreadCount++
 		}
 		m.conversations[jid] = conv
@@ -638,6 +656,10 @@ func (m *Model) handleNewMessage(msg theme.Message) (Model, tea.Cmd) {
 
 	if m.resolveConversationJID(m.chatView.ChatJID()) == jid {
 		m.chatView.AppendMessage(msg)
+		// The user is looking at this chat, so the message is read on arrival.
+		if !msg.IsFromMe {
+			m.markChatRead(jid, conv.IsGroup, []theme.Message{msg}, 1)
+		}
 	}
 	return *m, nil
 }
