@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -681,5 +682,27 @@ func TestMediaOpenCommandLoopsAnimatedMedia(t *testing.T) {
 		if got != tt.want || cmd.Args[len(cmd.Args)-1] != tt.path {
 			t.Errorf("%s %s: args = %v, want %q + path", tt.mediaType, filepath.Base(tt.path), cmd.Args, tt.want)
 		}
+	}
+}
+
+func TestHistoryRequestInfo(t *testing.T) {
+	oldest := core.Message{ID: "OLD1", ChatJID: testPN.String(), IsFromMe: true, Timestamp: time.Unix(1700000000, 0)}
+	info, err := historyRequestInfo(oldest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Chat != testPN || info.ID != "OLD1" || !info.IsFromMe || !info.Timestamp.Equal(oldest.Timestamp) {
+		t.Errorf("info = %+v", info)
+	}
+	if _, err := historyRequestInfo(core.Message{ChatJID: testPN.String()}); err == nil {
+		t.Error("want error without a message ID")
+	}
+	if _, err := historyRequestInfo(core.Message{ID: "x", ChatJID: "no-server"}); err == nil {
+		t.Error("want error for a chat JID without a server")
+	}
+
+	c, _ := newStoreClient(t)
+	if err := c.RequestOlderHistory(context.Background(), oldest, 50); err == nil {
+		t.Error("RequestOlderHistory offline = nil, want an error")
 	}
 }
