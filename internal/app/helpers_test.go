@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -113,10 +114,51 @@ func newTestModel(t *testing.T) (Model, *store.Store) {
 }
 
 // newRecordingModel returns a model wired to a recordingWA so tests can inspect
-// the calls it receives.
-func newRecordingModel(t *testing.T) (Model, *store.Store, *recordingWA) {
+// the calls it receives. alts optionally seeds LID↔PN aliases.
+func newRecordingModel(t *testing.T, alts ...map[string]string) (Model, *store.Store, *recordingWA) {
 	t.Helper()
 	s := newTestStore(t)
 	wa := &recordingWA{}
+	if len(alts) > 0 {
+		wa.alts = alts[0]
+	}
 	return NewModel(wa, s, "test", nil), s, wa
+}
+
+// seedConv registers a conversation in both the store and the chat engine.
+func seedConv(t *testing.T, m *Model, conv core.Conversation) {
+	t.Helper()
+	if err := m.store.UpsertConversation(context.Background(), conv); err != nil {
+		t.Fatalf("UpsertConversation() error = %v", err)
+	}
+	m.chats.Load([]core.Conversation{conv})
+}
+
+// seedStored persists messages so that selectChat loads them from the store.
+func seedStored(t *testing.T, m *Model, msgs []core.Message) {
+	t.Helper()
+	if err := m.store.InsertMessages(context.Background(), msgs); err != nil {
+		t.Fatalf("InsertMessages() error = %v", err)
+	}
+}
+
+// conv returns the engine's current state for a conversation.
+func conv(m Model, jid string) core.Conversation {
+	c, _ := m.chats.Conversation(jid)
+	return c
+}
+
+// update runs one message through Update and returns the resulting model.
+func update(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
+	t.Helper()
+	updated, cmd := m.Update(msg)
+	return updated.(Model), cmd
+}
+
+func msgIDs(msgs []core.Message) []string {
+	out := make([]string, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.ID
+	}
+	return out
 }

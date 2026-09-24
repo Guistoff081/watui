@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -27,41 +28,11 @@ func stickerMsgs(jid string, n int) []core.Message {
 	return msgs
 }
 
-func TestStickersToAutoDownloadNewestFirst(t *testing.T) {
-	msgs := stickerMsgs("c@s.whatsapp.net", 5)
-	got := msgIDs(stickersToAutoDownload(msgs, 3))
-	want := []string{"s4", "s3", "s2"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("stickersToAutoDownload() = %v, want %v", got, want)
-	}
-}
-
-func TestStickersToAutoDownloadSkipsIneligible(t *testing.T) {
-	msgs := stickerMsgs("c@s.whatsapp.net", 5)
-	msgs[4].MediaPath = "/cache/s4.webp" // already downloaded
-	msgs[3].DirectPath = ""              // nothing to download from
-	msgs[2].MediaType = "image"          // not a sticker
-	got := msgIDs(stickersToAutoDownload(msgs, 10))
-	want := []string{"s1", "s0"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("stickersToAutoDownload() = %v, want %v", got, want)
-	}
-}
-
-func TestStickersToAutoDownloadEmpty(t *testing.T) {
-	if got := stickersToAutoDownload(nil, 10); len(got) != 0 {
-		t.Fatalf("stickersToAutoDownload(nil) = %v, want empty", msgIDs(got))
-	}
-	if got := stickersToAutoDownload(stickerMsgs("c@s.whatsapp.net", 3), 0); len(got) != 0 {
-		t.Fatalf("stickersToAutoDownload(limit 0) = %v, want empty", msgIDs(got))
-	}
-}
-
 func TestSelectChatAutoDownloadsNewestStickers(t *testing.T) {
 	m, _, wa := newRecordingModel(t)
 	jid := "123@s.whatsapp.net"
-	m.conversations[jid] = core.Conversation{JID: jid}
-	m.chatMessages[jid] = stickerMsgs(jid, 15)
+	seedConv(t, &m, core.Conversation{JID: jid})
+	seedStored(t, &m, stickerMsgs(jid, 15))
 
 	m, _ = m.selectChat(jid)
 
@@ -81,11 +52,12 @@ func setupPendingOpen(t *testing.T) (Model, *recordingWA, string) {
 	m, _, wa := newRecordingModel(t)
 	m.statusBar.SetWidth(200)
 	jid := "123@s.whatsapp.net"
-	m.conversations[jid] = core.Conversation{JID: jid}
-	m.chatMessages[jid] = []core.Message{{
+	seedConv(t, &m, core.Conversation{JID: jid})
+	seedStored(t, &m, []core.Message{{
 		ID: "img1", ChatJID: jid, MediaType: "image", DirectPath: "/direct/img1",
 		Timestamp: time.Unix(100, 0),
-	}}
+	}})
+	m, _ = m.selectChat(jid)
 	if cmd := m.handleMediaOpen(jid, "img1"); cmd == nil {
 		t.Fatal("handleMediaOpen() returned nil cmd, want download")
 	}
@@ -149,5 +121,20 @@ func TestMediaDownloadedOpensPending(t *testing.T) {
 	want := []openMediaCall{{Path: "/cache/img1.jpg", MediaType: "image"}}
 	if !reflect.DeepEqual(opens, want) {
 		t.Fatalf("opens = %v, want %v", opens, want)
+	}
+	if msg, _ := m.chats.Find(jid, "img1"); msg.MediaPath != "/cache/img1.jpg" {
+		t.Errorf("cached MediaPath = %q, want downloaded path", msg.MediaPath)
+	}
+	stored, _ := m.store.GetMessagesForChats(context.Background(), []string{jid}, 10)
+	if len(stored) != 1 || stored[0].MediaPath != "/cache/img1.jpg" {
+		t.Errorf("stored = %+v, want media path persisted", stored)
+	}
+
+	// Once downloaded, opening again goes straight to the file.
+	if cmd := m.handleMediaOpen(jid, "img1"); cmd == nil || m.pendingOpenMsgID != "" {
+		t.Fatalf("handleMediaOpen(downloaded) = %v, pending %q; want direct open", cmd != nil, m.pendingOpenMsgID)
+	}
+	if cmd := m.handleMediaOpen(jid, "missing"); cmd != nil {
+		t.Errorf("handleMediaOpen(unknown) cmd != nil, want nil")
 	}
 }
