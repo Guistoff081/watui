@@ -1,7 +1,6 @@
 package chatview
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -194,9 +193,16 @@ func (m *Model) UpdateMessageMediaPath(msgID, path string) {
 
 // InvalidateThumbnail removes a message's rendered thumbnail from the cache so
 // it will be re-generated on the next rebuild (e.g. after a sticker downloads).
+// InvalidateThumbnail drops every cached preview of msgID (entries are keyed
+// by msgID and thumbnail column count, which differs from the view width), so
+// a preview cached as empty before its file or poster existed is re-rendered.
 func (m *Model) InvalidateThumbnail(msgID string) {
-	key := fmt.Sprintf("%s:%d", msgID, m.width)
-	delete(m.thumbCache, key)
+	prefix := msgID + ":"
+	for key := range m.thumbCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.thumbCache, key)
+		}
+	}
 }
 
 func (m Model) ChatJID() string { return m.chatJID }

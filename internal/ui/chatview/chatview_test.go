@@ -151,12 +151,20 @@ func TestRenderMessageAudioHasHint(t *testing.T) {
 func TestInvalidateThumbnailClearsEntry(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
-	// Seed with the key format that InvalidateThumbnail generates (msgID + ":" + width).
-	key := "msg1:80"
-	m.thumbCache[key] = "CACHED"
+	// Entries are keyed msgID:cols for any column count; all of them go, and
+	// other messages' entries (even with a shared ID prefix) stay.
+	m.thumbCache["msg1:40"] = "CACHED"
+	m.thumbCache["msg1:12"] = "CACHED"
+	m.thumbCache["msg10:40"] = "OTHER"
 	m.InvalidateThumbnail("msg1")
-	if _, ok := m.thumbCache[key]; ok {
-		t.Error("InvalidateThumbnail did not remove cached entry")
+	if _, ok := m.thumbCache["msg1:40"]; ok {
+		t.Error("InvalidateThumbnail did not remove msg1:40")
+	}
+	if _, ok := m.thumbCache["msg1:12"]; ok {
+		t.Error("InvalidateThumbnail did not remove msg1:12")
+	}
+	if _, ok := m.thumbCache["msg10:40"]; !ok {
+		t.Error("InvalidateThumbnail removed another message's entry")
 	}
 }
 
@@ -264,5 +272,37 @@ func TestRenderMessageUsesPosterForAnimatedMedia(t *testing.T) {
 		if !strings.Contains(out, "▀") {
 			t.Errorf("%s: no half-block preview rendered from the poster:\n%s", msg.MediaType, stripANSI(out))
 		}
+	}
+}
+
+// A preview rendered before the file/poster existed is cached as empty; the
+// download handler's InvalidateThumbnail must clear it so the next render
+// picks up the poster. The cache key uses the thumbnail column count, not
+// the view width, so invalidation has to drop every entry for the message.
+func TestInvalidateThumbnailPicksUpPosterCreatedLater(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "a.webp")
+	msg := core.Message{ID: "late", ChatJID: "c@s.whatsapp.net", MediaType: "sticker", IsAnimated: true,
+		MediaPath: media, Timestamp: time.Unix(0, 0)}
+
+	m := New()
+	m.SetSize(100, 30)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{msg})
+	if strings.Contains(m.View(), "▀") {
+		t.Fatal("preview rendered before the poster exists")
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for i := range img.Pix {
+		img.Pix[i] = 200
+	}
+	f, _ := os.Create(core.PosterPath(media))
+	_ = png.Encode(f, img)
+	f.Close()
+
+	m.InvalidateThumbnail("late")
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{msg})
+	if !strings.Contains(m.View(), "▀") {
+		t.Errorf("poster not rendered after InvalidateThumbnail:\n%s", stripANSI(m.View()))
 	}
 }
