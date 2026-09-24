@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -316,7 +315,7 @@ func mediaMetaEqual(a, b mediaMeta) bool {
 
 // TestHandleMessageSkipsNonDisplayable drives handleMessage with a group chat
 // (group JIDs need no whatsmeow store lookups) and checks that only content
-// messages reach the Bubble Tea program.
+// messages reach the event handler.
 func TestHandleMessageSkipsNonDisplayable(t *testing.T) {
 	group := types.NewJID("123456", types.GroupServer)
 	sender := types.NewJID("5511999999999", types.DefaultUserServer)
@@ -355,8 +354,8 @@ func TestHandleMessageSkipsNonDisplayable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var sent []tea.Msg
-			c := &Client{sendMsg: func(m tea.Msg) { sent = append(sent, m) }}
+			var sent []core.Event
+			c := &Client{onEvent: func(e core.Event) { sent = append(sent, e) }}
 
 			c.handleMessage(newEvt("ID1", tt.msg))
 

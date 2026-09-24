@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/watui/watui/internal/app"
 	"github.com/watui/watui/internal/config"
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/debug"
 	"github.com/watui/watui/internal/store"
 	"github.com/watui/watui/internal/whatsapp"
@@ -83,9 +84,11 @@ func main() {
 	}
 	defer appStore.Close()
 
-	model := app.NewModel(waClient, appStore, version, logger)
+	model := app.NewModel(app.NewWAClient(waClient), appStore, version, logger)
 	program := tea.NewProgram(model, tea.WithAltScreen())
-	waClient.SetSendMsg(program.Send)
+	// Session events (QR codes, messages, receipts, ...) go straight into the
+	// Bubble Tea loop; every core.Event is also a tea.Msg.
+	waClient.SetEventHandler(func(e core.Event) { program.Send(e) })
 
 	if _, err := program.Run(); err != nil {
 		if logger != nil {
