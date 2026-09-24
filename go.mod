@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/mattn/go-sqlite3 v1.14.45
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/rs/zerolog v1.35.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/whatsmeow v0.0.0-20260616120636-eaa388b4e537
