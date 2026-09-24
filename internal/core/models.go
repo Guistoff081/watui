@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Conversation struct {
 	JID         string
@@ -64,4 +67,21 @@ func (m Message) PreviewText() string {
 		return tag + " " + m.Content
 	}
 	return tag
+}
+
+// DisplayName returns the name to show for conv. Chats with no known name
+// (numbers outside the address book with no push name) fall back to the
+// phone number instead of the raw JID, like WhatsApp does.
+func DisplayName(conv Conversation) string {
+	if conv.Name != "" && conv.Name != conv.JID {
+		return conv.Name
+	}
+	user, server, ok := strings.Cut(conv.JID, "@")
+	if !ok || server != "s.whatsapp.net" {
+		return conv.JID
+	}
+	if user == "0" {
+		return "WhatsApp" // official service account
+	}
+	return "+" + user
 }

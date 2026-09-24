@@ -16,11 +16,7 @@ func NewItem(conv core.Conversation) Item {
 }
 
 func (i Item) Title() string {
-	name := i.conversation.Name
-	if name == "" {
-		name = i.conversation.JID
-	}
-	return name
+	return core.DisplayName(i.conversation)
 }
 
 func (i Item) Description() string {

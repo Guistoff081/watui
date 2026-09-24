@@ -116,6 +116,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contactNamesMsg:
 		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(msg.Names)))
 
+	case core.PushNameChanged:
+		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(map[string]string{msg.JID: msg.Name})))
+
 	case core.ConversationUpdated:
 		cmds = append(cmds, m.applyEffects(m.chats.UpdateConversation(msg.Conversation)))
 
@@ -188,6 +191,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case core.MediaDownloadFailed:
 		cmds = append(cmds, m.handleMediaDownloadFailed(msg))
+
+	case mediaOpenFailedMsg:
+		m.log.Error(msg.Err, "media open failed")
+		m.statusBar.SetMessage("Could not open media: " + msg.Err.Error())
+		cmds = append(cmds, m.clearStatusAfter(statusTimeout))
 
 	case chatview.MediaOpenMsg:
 		cmds = append(cmds, m.handleMediaOpen(msg.ChatJID, msg.MessageID))

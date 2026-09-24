@@ -342,9 +342,16 @@ func TestMediaOpenCommand(t *testing.T) {
 		{"image", has("mpv"), "xdg-open"},
 	}
 	for _, tt := range tests {
-		cmd := mediaOpenCommand("-weird.ogg", tt.mediaType, tt.lookPath)
-		if len(cmd.Args) != 3 || filepath.Base(cmd.Args[0]) != tt.wantProg || cmd.Args[1] != "--" || cmd.Args[2] != "-weird.ogg" {
-			t.Errorf("mediaOpenCommand(%s) args = %v, want %s -- -weird.ogg", tt.mediaType, cmd.Args, tt.wantProg)
+		// A relative path starting with "-" must reach the program as an
+		// absolute path (so it can't be read as a flag) and without "--":
+		// xdg-open rejects "--" as an unknown option and opens nothing.
+		cmd, err := mediaOpenCommand("-weird.ogg", tt.mediaType, tt.lookPath)
+		if err != nil {
+			t.Fatalf("mediaOpenCommand(%s) error = %v", tt.mediaType, err)
+		}
+		if len(cmd.Args) != 2 || filepath.Base(cmd.Args[0]) != tt.wantProg ||
+			!filepath.IsAbs(cmd.Args[1]) || filepath.Base(cmd.Args[1]) != "-weird.ogg" {
+			t.Errorf("mediaOpenCommand(%s) args = %v, want %s /abs/-weird.ogg", tt.mediaType, cmd.Args, tt.wantProg)
 		}
 	}
 }
@@ -562,5 +569,18 @@ func TestHandleEventHistorySync(t *testing.T) {
 	}
 	if got[3] != (core.HistorySyncComplete{}) {
 		t.Errorf("event[3] = %#v, want HistorySyncComplete", got[3])
+	}
+}
+
+func TestHandleEventPushName(t *testing.T) {
+	c, rec := newStoreClient(t)
+
+	c.handleEvent(&events.PushName{JID: testPN, NewPushName: "Loja"})
+	c.handleEvent(&events.PushName{JID: testPN}) // cleared name: nothing to apply
+
+	got := rec.take()
+	want := core.PushNameChanged{JID: testPN.String(), Name: "Loja"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("events = %#v, want [%#v]", got, want)
 	}
 }

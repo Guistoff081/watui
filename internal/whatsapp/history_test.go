@@ -18,6 +18,7 @@ type fakeHistoryResolver struct {
 	contacts  map[string]string
 	groups    map[string]string
 	skips     []string
+	unknown   []string
 }
 
 func (f *fakeHistoryResolver) canonicalChatJID(chat types.JID) types.JID {
@@ -32,11 +33,15 @@ func (f *fakeHistoryResolver) groupName(jid types.JID) string   { return f.group
 func (f *fakeHistoryResolver) skipped(id string, _ *waProto.Message) {
 	f.skips = append(f.skips, id)
 }
+func (f *fakeHistoryResolver) unsupported(id string, _ *waProto.Message) {
+	f.unknown = append(f.unknown, id)
+}
 
 type histMsg struct {
 	id          string
 	fromMe      bool
 	participant string
+	pushName    string
 	ts          uint64
 	msg         *waProto.Message
 }
@@ -56,6 +61,7 @@ func historyConv(id string, msgs ...histMsg) *waHistorySync.Conversation {
 				Key:              key,
 				MessageTimestamp: proto.Uint64(m.ts),
 				Message:          m.msg,
+				PushName:         pushNamePtr(m.pushName),
 			},
 		})
 	}
@@ -148,13 +154,13 @@ func TestConvertHistoryConversationGroupName(t *testing.T) {
 	}
 }
 
-func TestConvertHistoryConversationEmptyTextIsMedia(t *testing.T) {
+func TestConvertHistoryConversationUnknownKindIsPlaceholder(t *testing.T) {
 	conv := historyConv("5511999999999@s.whatsapp.net",
-		histMsg{id: "p1", ts: 1, msg: &waProto.Message{PollCreationMessage: &waProto.PollCreationMessage{}}},
+		histMsg{id: "p1", ts: 1, msg: &waProto.Message{ScheduledCallCreationMessage: &waProto.ScheduledCallCreationMessage{}}},
 	)
 	_, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{})
-	if len(msgs) != 1 || msgs[0].Content != "[media]" {
-		t.Errorf("messages = %+v, want one [media] placeholder", msgs)
+	if len(msgs) != 1 || msgs[0].Content != unsupportedPlaceholder {
+		t.Errorf("messages = %+v, want one unsupported placeholder", msgs)
 	}
 }
 
@@ -286,5 +292,61 @@ func TestConvertHistoryConversationCanonicalSender(t *testing.T) {
 		if m.SenderJID != pn.String() {
 			t.Errorf("%s: 1:1 sender = %q, want canonical chat %s", m.ID, m.SenderJID, pn)
 		}
+	}
+}
+
+func pushNamePtr(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return proto.String(name)
+}
+
+func TestConvertHistoryConversationUsesPushNames(t *testing.T) {
+	text := func(s string) *waProto.Message { return &waProto.Message{Conversation: proto.String(s)} }
+	conv := historyConv("5511999999999@s.whatsapp.net",
+		histMsg{id: "a", ts: 1, pushName: "Loja Antiga", msg: text("oi")},
+		histMsg{id: "b", ts: 2, fromMe: true, pushName: "Eu", msg: text("oi")},
+		histMsg{id: "c", ts: 3, pushName: "Loja Nova", msg: text("promo")},
+	)
+	got, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{})
+	if got.Name != "Loja Nova" {
+		t.Errorf("unnamed 1:1 name = %q, want newest incoming push name", got.Name)
+	}
+	if msgs[0].SenderName != "Loja Antiga" || msgs[1].SenderName != "" {
+		t.Errorf("sender names = %q, %q; want push name on incoming only", msgs[0].SenderName, msgs[1].SenderName)
+	}
+
+	named, _, _ := convertHistoryConversation(conv, &fakeHistoryResolver{
+		contacts: map[string]string{"5511999999999@s.whatsapp.net": "Agenda"},
+	})
+	if named.Name != "Agenda" {
+		t.Errorf("name = %q, contact name must win over push name", named.Name)
+	}
+}
+
+func TestConvertHistoryConversationGroupNameNotFromPushName(t *testing.T) {
+	conv := historyConv("123@g.us",
+		histMsg{id: "g", ts: 1, participant: "55119@s.whatsapp.net", pushName: "Membro",
+			msg: &waProto.Message{Conversation: proto.String("oi")}},
+	)
+	got, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{})
+	if got.Name != "" {
+		t.Errorf("group name = %q, must not come from a member's push name", got.Name)
+	}
+	if msgs[0].SenderName != "Membro" {
+		t.Errorf("group sender name = %q, want Membro", msgs[0].SenderName)
+	}
+}
+
+func TestConvertHistoryConversationReportsUnsupported(t *testing.T) {
+	conv := historyConv("5511999999999@s.whatsapp.net",
+		histMsg{id: "u", ts: 1, msg: &waProto.Message{ScheduledCallCreationMessage: &waProto.ScheduledCallCreationMessage{}}},
+		histMsg{id: "t", ts: 2, msg: &waProto.Message{Conversation: proto.String("ok")}},
+	)
+	r := &fakeHistoryResolver{}
+	convertHistoryConversation(conv, r)
+	if len(r.unknown) != 1 || r.unknown[0] != "u" {
+		t.Errorf("unsupported = %v, want [u]", r.unknown)
 	}
 }

@@ -378,3 +378,40 @@ func TestHandleMessageSkipsNonDisplayable(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTextContentStructuredKinds(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{"template", &waProto.Message{TemplateMessage: &waProto.TemplateMessage{
+			HydratedTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{HydratedContentText: proto.String("Seu pedido saiu")},
+		}}, "Seu pedido saiu"},
+		{"interactive", &waProto.Message{InteractiveMessage: &waProto.InteractiveMessage{
+			Body: &waProto.InteractiveMessage_Body{Text: proto.String("Escolha uma opção")},
+		}}, "Escolha uma opção"},
+		{"buttons", &waProto.Message{ButtonsMessage: &waProto.ButtonsMessage{ContentText: proto.String("Confirma?")}}, "Confirma?"},
+		{"list", &waProto.Message{ListMessage: &waProto.ListMessage{Description: proto.String("Menu")}}, "Menu"},
+		{"buttons reply", &waProto.Message{ButtonsResponseMessage: &waProto.ButtonsResponseMessage{
+			Response: &waProto.ButtonsResponseMessage_SelectedDisplayText{SelectedDisplayText: "Sim"},
+		}}, "Sim"},
+		{"template reply", &waProto.Message{TemplateButtonReplyMessage: &waProto.TemplateButtonReplyMessage{SelectedDisplayText: proto.String("Ok")}}, "Ok"},
+		{"list reply", &waProto.Message{ListResponseMessage: &waProto.ListResponseMessage{Title: proto.String("Item 1")}}, "Item 1"},
+		{"poll", &waProto.Message{PollCreationMessageV3: &waProto.PollCreationMessage{Name: proto.String("Almoço?")}}, "[poll] Almoço?"},
+		{"call", &waProto.Message{CallLogMesssage: &waProto.CallLogMessage{}}, "[call]"},
+		{"video call", &waProto.Message{CallLogMesssage: &waProto.CallLogMessage{IsVideo: proto.Bool(true)}}, "[video call]"},
+		{"video note", &waProto.Message{PtvMessage: &waProto.VideoMessage{}}, "[video note]"},
+		{"live location", &waProto.Message{LiveLocationMessage: &waProto.LiveLocationMessage{}}, "[live location]"},
+		{"contacts", &waProto.Message{ContactsArrayMessage: &waProto.ContactsArrayMessage{}}, "[contacts]"},
+		{"group invite", &waProto.Message{GroupInviteMessage: &waProto.GroupInviteMessage{GroupName: proto.String("Família")}}, "[group invite] Família"},
+		{"event", &waProto.Message{EventMessage: &waProto.EventMessage{Name: proto.String("Festa")}}, "[event] Festa"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractTextContent(tt.msg); got != tt.want {
+				t.Errorf("extractTextContent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

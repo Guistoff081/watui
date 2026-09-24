@@ -7,10 +7,10 @@ import (
 	"github.com/watui/watui/internal/core"
 )
 
-func TestItemTitleFallsBackToJID(t *testing.T) {
+func TestItemTitleFallsBackToPhoneNumber(t *testing.T) {
 	noName := NewItem(core.Conversation{JID: "123@s.whatsapp.net"})
-	if got := noName.Title(); got != "123@s.whatsapp.net" {
-		t.Errorf("Title() = %q, want JID fallback", got)
+	if got := noName.Title(); got != "+123" {
+		t.Errorf("Title() = %q, want phone number fallback", got)
 	}
 	named := NewItem(core.Conversation{JID: "123@s.whatsapp.net", Name: "Alice"})
 	if got := named.Title(); got != "Alice" {

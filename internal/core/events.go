@@ -97,6 +97,13 @@ type MediaDownloadFailed struct {
 	Err       error
 }
 
+// PushNameChanged is emitted when a user's self-chosen display name changes.
+// It only names chats that have no better name (address book, business).
+type PushNameChanged struct {
+	JID  string // canonical chat JID
+	Name string
+}
+
 // isEvent implementations seal the Event interface to this package.
 func (QRCode) isEvent()              {}
 func (QRTimeout) isEvent()           {}
@@ -115,3 +122,4 @@ func (Typing) isEvent()              {}
 func (HistorySyncComplete) isEvent() {}
 func (MediaDownloaded) isEvent()     {}
 func (MediaDownloadFailed) isEvent() {}
+func (PushNameChanged) isEvent() {}

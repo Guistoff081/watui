@@ -96,6 +96,9 @@ type persistErrMsg struct{ Err error }
 // connectFailedMsg reports that the WhatsApp socket could not be opened. It is
 // the only error that switches the app to StateError.
 type connectFailedMsg struct{ Err error }
+
+// mediaOpenFailedMsg reports that no external app could open a media file.
+type mediaOpenFailedMsg struct{ Err error }
 type reconnectMsg struct{}
 type typingStopMsg struct{ gen int }
 type clearStatusMsg struct{}
