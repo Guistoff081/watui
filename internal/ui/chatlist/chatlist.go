@@ -207,19 +207,24 @@ func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
 	gap := max(0, w-lipgloss.Width(nameRendered)-lipgloss.Width(timeStr))
 	line1 := nameRendered + strings.Repeat(" ", gap) + timeStyle.Render(timeStr)
 
-	// Second line: preview + unread badge
+	// Second line: preview + unread badge. Measure the rendered badge: its
+	// padding makes it wider than the raw count.
 	preview := item.Description()
-	previewMaxW := w
+	badge := ""
 	if unread != "" {
-		previewMaxW = w - lipgloss.Width(unread) - 2
+		badge = theme.ChatItemUnread.Render(unread)
+	}
+	previewMaxW := w
+	if badge != "" {
+		previewMaxW = w - lipgloss.Width(badge) - 1
 	}
 	preview = ansi.Truncate(preview, max(0, previewMaxW), "…")
 
 	previewRendered := theme.ChatItemPreview.Render(preview)
 	line2 := previewRendered
-	if unread != "" {
-		gap2 := max(0, w-lipgloss.Width(previewRendered)-lipgloss.Width(unread)-1)
-		line2 = previewRendered + strings.Repeat(" ", gap2) + theme.ChatItemUnread.Render(unread)
+	if badge != "" {
+		gap2 := max(1, w-lipgloss.Width(previewRendered)-lipgloss.Width(badge))
+		line2 = previewRendered + strings.Repeat(" ", gap2) + badge
 	}
 
 	// Both rows share the 2-column prefix gutter so the preview lines up

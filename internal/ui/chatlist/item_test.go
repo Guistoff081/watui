@@ -3,9 +3,11 @@ package chatlist
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/watui/watui/internal/core"
 )
@@ -86,6 +88,33 @@ func TestRenderItemHasFixedHeightAndWidth(t *testing.T) {
 			}
 			if !utf8.ValidString(l) {
 				t.Errorf("selected=%v: invalid UTF-8 in %q", selected, l)
+			}
+		}
+	}
+}
+
+// The unread badge is rendered with padding (" 3 "), so row math must use its
+// rendered width; with the raw width the preview row overflowed by one column
+// and the badge wrapped into the spacer row of the selected item.
+func TestRenderItemBadgeStaysOnPreviewRow(t *testing.T) {
+	m := New()
+	m.SetSize(30, 20)
+	it := NewItem(core.Conversation{JID: "a@s.whatsapp.net", Name: "Elisson Guímel",
+		LastMessage: "Olha os logs do watui", UnreadCount: 3, LastMsgTime: time.Now()})
+	for _, selected := range []bool{false, true} {
+		rows := strings.Split(m.renderItem(it, selected, false), "\n")
+		if len(rows) != 3 {
+			t.Fatalf("selected=%v: %d rows, want name, preview and spacer", selected, len(rows))
+		}
+		if !strings.Contains(rows[1], "3") {
+			t.Errorf("selected=%v: badge not on the preview row: %q", selected, rows[1])
+		}
+		if strings.TrimSpace(ansi.Strip(rows[2])) != "" {
+			t.Errorf("selected=%v: spacer row not empty (badge wrapped?): %q", selected, rows[2])
+		}
+		for i, r := range rows {
+			if w := lipgloss.Width(r); w > 29 {
+				t.Errorf("selected=%v: row %d is %d cols, want <= 29 (panel content)", selected, i, w)
 			}
 		}
 	}
