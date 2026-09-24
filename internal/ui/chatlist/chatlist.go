@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/theme"
 )
 
@@ -96,7 +97,7 @@ type ChatSelectedCmd struct {
 	JID string
 }
 
-func (m *Model) UpsertConversation(conv theme.Conversation) {
+func (m *Model) UpsertConversation(conv core.Conversation) {
 	for i, item := range m.items {
 		if item.JID() == conv.JID {
 			m.items[i] = NewItem(conv)

@@ -1,102 +1,7 @@
-package theme
+package core
 
-import (
-	"time"
+import "time"
 
-	"go.mau.fi/whatsmeow/types"
-)
-
-// Auth messages
-type QRCodeMsg struct {
-	Code string
-}
-
-type QRTimeoutMsg struct{}
-
-type LoginSuccessMsg struct {
-	JID types.JID
-}
-
-type LoginFailedMsg struct {
-	Err error
-}
-
-// Connection messages
-type ConnectedMsg struct {
-	JID types.JID
-}
-
-type DisconnectedMsg struct {
-	Err error
-}
-
-type ReconnectingMsg struct{}
-
-// ClientOutdatedMsg is emitted when WhatsApp rejects the connection because the
-// whatsmeow client version is too old (failure reason 405).
-type ClientOutdatedMsg struct{}
-
-// Chat messages
-type ConversationListMsg struct {
-	Conversations []Conversation
-}
-
-type ConversationUpdatedMsg struct {
-	Conversation Conversation
-}
-
-type ChatSelectedMsg struct {
-	JID types.JID
-}
-
-type MessagesLoadedMsg struct {
-	ChatJID  types.JID
-	Messages []Message
-}
-
-type NewMessageMsg struct {
-	Message Message
-}
-
-type MessageSentMsg struct {
-	ChatJID   types.JID
-	MessageID string
-	Timestamp time.Time
-}
-
-type MessageSendFailedMsg struct {
-	ChatJID   types.JID
-	MessageID string
-	Err       error
-}
-
-type MessageStatusMsg struct {
-	ChatJID   types.JID
-	MessageID string
-	Status    string
-}
-
-// Typing
-type TypingMsg struct {
-	ChatJID  types.JID
-	Sender   types.JID
-	IsTyping bool
-}
-
-// History sync
-type HistorySyncProgressMsg struct {
-	Progress int
-}
-
-type HistorySyncCompleteMsg struct{}
-
-// Errors
-type ErrorMsg struct {
-	Err     error
-	Context string
-}
-
-// Data models shared across packages
 type Conversation struct {
 	JID         string
 	Name        string
@@ -159,19 +64,4 @@ func (m Message) PreviewText() string {
 		return tag + " " + m.Content
 	}
 	return tag
-}
-
-// MediaDownloadedMsg is emitted when a media file has been successfully downloaded
-// and saved to the local cache.
-type MediaDownloadedMsg struct {
-	ChatJID   string
-	MessageID string
-	Path      string
-}
-
-// MediaDownloadFailedMsg is emitted when a media download fails.
-type MediaDownloadFailedMsg struct {
-	ChatJID   string
-	MessageID string
-	Err       error
 }

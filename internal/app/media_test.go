@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 // stickerMsgs builds n sticker messages (s0..s{n-1}) in ascending time order,
 // all downloadable (DirectPath set, MediaPath empty).
-func stickerMsgs(jid string, n int) []theme.Message {
-	msgs := make([]theme.Message, n)
+func stickerMsgs(jid string, n int) []core.Message {
+	msgs := make([]core.Message, n)
 	for i := range msgs {
-		msgs[i] = theme.Message{
+		msgs[i] = core.Message{
 			ID:         fmt.Sprintf("s%d", i),
 			ChatJID:    jid,
 			MediaType:  "sticker",
@@ -60,7 +60,7 @@ func TestStickersToAutoDownloadEmpty(t *testing.T) {
 func TestSelectChatAutoDownloadsNewestStickers(t *testing.T) {
 	m, _, wa := newRecordingModel(t)
 	jid := "123@s.whatsapp.net"
-	m.conversations[jid] = theme.Conversation{JID: jid}
+	m.conversations[jid] = core.Conversation{JID: jid}
 	m.chatMessages[jid] = stickerMsgs(jid, 15)
 
 	m, _ = m.selectChat(jid)
@@ -81,8 +81,8 @@ func setupPendingOpen(t *testing.T) (Model, *recordingWA, string) {
 	m, _, wa := newRecordingModel(t)
 	m.statusBar.SetWidth(200)
 	jid := "123@s.whatsapp.net"
-	m.conversations[jid] = theme.Conversation{JID: jid}
-	m.chatMessages[jid] = []theme.Message{{
+	m.conversations[jid] = core.Conversation{JID: jid}
+	m.chatMessages[jid] = []core.Message{{
 		ID: "img1", ChatJID: jid, MediaType: "image", DirectPath: "/direct/img1",
 		Timestamp: time.Unix(100, 0),
 	}}
@@ -98,7 +98,7 @@ func setupPendingOpen(t *testing.T) (Model, *recordingWA, string) {
 func TestMediaDownloadFailedClearsPendingAndReports(t *testing.T) {
 	m, _, jid := setupPendingOpen(t)
 
-	updated, cmd := m.Update(theme.MediaDownloadFailedMsg{
+	updated, cmd := m.Update(core.MediaDownloadFailed{
 		ChatJID: jid, MessageID: "img1", Err: errors.New("boom"),
 	})
 	m = updated.(Model)
@@ -119,7 +119,7 @@ func TestMediaDownloadFailedBackgroundIsQuiet(t *testing.T) {
 
 	// A background (e.g. sticker auto-download) failure for another message
 	// must not touch the pending open or the status bar.
-	updated, _ := m.Update(theme.MediaDownloadFailedMsg{
+	updated, _ := m.Update(core.MediaDownloadFailed{
 		ChatJID: jid, MessageID: "sticker9", Err: errors.New("boom"),
 	})
 	m = updated.(Model)
@@ -135,7 +135,7 @@ func TestMediaDownloadFailedBackgroundIsQuiet(t *testing.T) {
 func TestMediaDownloadedOpensPending(t *testing.T) {
 	m, wa, jid := setupPendingOpen(t)
 
-	updated, _ := m.Update(theme.MediaDownloadedMsg{
+	updated, _ := m.Update(core.MediaDownloaded{
 		ChatJID: jid, MessageID: "img1", Path: "/cache/img1.jpg",
 	})
 	m = updated.(Model)

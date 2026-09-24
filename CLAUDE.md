@@ -42,12 +42,12 @@ whatsmeow WebSocket → internal/whatsapp/events.go → client.send(tea.Msg) →
 
 ### Package layout
 
-- **`internal/theme/`** — shared data models (`Conversation`, `Message`) and all `tea.Msg` types. Every package imports this; it imports nothing from the rest of the codebase. This avoids import cycles.
-- **`internal/whatsapp/`** — wraps `go.mau.fi/whatsmeow`. `client.go` exposes the `WAClient` interface. `events.go` translates whatsmeow events to `theme.*Msg` types and calls `client.send()`.
+- **`internal/core/`** — domain models (`Conversation`, `Message`) and domain events (`core.Event`: `NewMessage`, `Connected`, `MessageSent`, …). No UI dependency; imports nothing from the rest of the codebase, which avoids import cycles. Events are plain structs, so the app receives them directly as `tea.Msg`.
+- **`internal/whatsapp/`** — wraps `go.mau.fi/whatsmeow`. `client.go` exposes the `WAClient` interface. `events.go` translates whatsmeow events to `core` events and calls `client.send()`.
 - **`internal/store/`** — app-level SQLite (not whatsmeow's own store). Stores `conversations` and `messages` tables. Migrations are in `migrations.go`.
-- **`internal/app/`** — root Bubble Tea model (`app.Model`). Routes all `tea.Msg` to sub-models, manages focus, handles layout. Holds in-memory caches (`chatMessages map[string][]theme.Message`, `conversations map[string]theme.Conversation`).
+- **`internal/app/`** — root Bubble Tea model (`app.Model`). Routes all `tea.Msg` to sub-models, manages focus, handles layout. Holds in-memory caches (`chatMessages map[string][]core.Message`, `conversations map[string]core.Conversation`).
 - **`internal/ui/`** — sub-models for each UI panel: `auth/qr.go`, `chatlist/`, `chatview/`, `input/`, `statusbar/`, `titlebar/`.
-- **`internal/theme/`** — also holds lipgloss styles (`styles.go`) and keymap (`keymap.go`) shared across UI packages.
+- **`internal/theme/`** — lipgloss styles (`styles.go`) and keymap (`keymap.go`) shared across UI packages.
 
 ### App states and focus
 
@@ -59,7 +59,7 @@ Title bar (1 line) + horizontal body (chat list 30% | message view 70%) + input 
 
 ### Data flow for a new message
 
-1. whatsmeow fires an event → `events.go` converts it to `theme.NewMessageMsg`
+1. whatsmeow fires an event → `events.go` converts it to `core.NewMessage`
 2. `client.send()` calls `program.Send()` → enters `app.Update()`
 3. `app.Model.handleNewMessage()` appends to in-memory cache, persists to `store`, updates chat list, and if the chat is open, calls `chatView.AppendMessage()`
 
@@ -74,6 +74,6 @@ Title bar (1 line) + horizontal body (chat list 30% | message view 70%) + input 
 ## Notes
 
 - WhatsApp's unofficial API violates ToS. This is a personal/hobby project.
-- whatsmeow handles reconnection automatically; `DisconnectedMsg` in `StateChat` shows "Reconnecting..." without exiting.
+- whatsmeow handles reconnection automatically; `core.Disconnected` in `StateChat` shows "Reconnecting..." without exiting.
 - Message timestamps are stored as Unix int64 in SQLite; `time.Time` is reconstructed on read.
 - The `WAClient` interface in `app.go` allows the whatsapp package to be mocked in tests.

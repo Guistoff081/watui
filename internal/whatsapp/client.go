@@ -18,8 +18,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rs/zerolog"
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/debug"
-	"github.com/watui/watui/internal/theme"
 	"go.mau.fi/whatsmeow"
 	waCompanionReg "go.mau.fi/whatsmeow/proto/waCompanionReg"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -119,12 +119,12 @@ func (c *Client) Connect() tea.Cmd {
 			for evt := range qrChan {
 				switch evt.Event {
 				case "code":
-					c.send(theme.QRCodeMsg{Code: evt.Code})
+					c.send(core.QRCode{Code: evt.Code})
 				case "timeout":
 					if c.dbg != nil {
 						c.dbg.Warn("QR code session timed out")
 					}
-					c.send(theme.QRTimeoutMsg{})
+					c.send(core.QRTimeout{})
 				case "success":
 					// Login event will be handled by the event handler
 					return nil
@@ -136,7 +136,7 @@ func (c *Client) Connect() tea.Cmd {
 					if c.dbg != nil {
 						c.dbg.Error(err, "QR login error")
 					}
-					return theme.LoginFailedMsg{Err: err}
+					return core.LoginFailed{Err: err}
 				default:
 					err := fmt.Errorf("QR pairing failed: %s", evt.Event)
 					if evt.Error != nil {
@@ -145,7 +145,7 @@ func (c *Client) Connect() tea.Cmd {
 					if c.dbg != nil {
 						c.dbg.Error(err, "QR channel terminal event")
 					}
-					return theme.LoginFailedMsg{Err: err}
+					return core.LoginFailed{Err: err}
 				}
 			}
 			return nil
@@ -157,7 +157,7 @@ func (c *Client) Connect() tea.Cmd {
 			return nil
 		}
 		if err != nil {
-			return theme.LoginFailedMsg{Err: err}
+			return core.LoginFailed{Err: err}
 		}
 		return nil
 	}
@@ -184,13 +184,13 @@ func (c *Client) SendTextMessage(jid types.JID, id, text string) tea.Cmd {
 			Conversation: proto.String(text),
 		}, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
-			return theme.MessageSendFailedMsg{
+			return core.MessageSendFailed{
 				ChatJID:   jid,
 				MessageID: id,
 				Err:       err,
 			}
 		}
-		return theme.MessageSentMsg{
+		return core.MessageSent{
 			ChatJID:   jid,
 			MessageID: resp.ID,
 			Timestamp: resp.Timestamp,
@@ -205,17 +205,17 @@ func (c *Client) SendFileMessage(jid types.JID, id, path string) tea.Cmd {
 	return func() tea.Msg {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
 		}
 		if len(data) > maxUploadSize {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
 		}
 
 		mimeType := detectMIME(path, data)
 
 		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaDocument)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
 		}
 
 		msg := &waE2E.Message{
@@ -233,9 +233,9 @@ func (c *Client) SendFileMessage(jid types.JID, id, path string) tea.Cmd {
 
 		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: err}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: err}
 		}
-		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+		return core.MessageSent{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
 	}
 }
 
@@ -245,17 +245,17 @@ func (c *Client) SendAudioMessage(jid types.JID, id, path string) tea.Cmd {
 	return func() tea.Msg {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
 		}
 		if len(data) > maxUploadSize {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
 		}
 
 		mimeType := detectMIME(path, data)
 
 		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaAudio)
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
 		}
 
 		msg := &waE2E.Message{
@@ -273,9 +273,9 @@ func (c *Client) SendAudioMessage(jid types.JID, id, path string) tea.Cmd {
 
 		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
 		if err != nil {
-			return theme.MessageSendFailedMsg{ChatJID: jid, MessageID: id, Err: err}
+			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: err}
 		}
-		return theme.MessageSentMsg{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+		return core.MessageSent{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
 	}
 }
 
@@ -399,10 +399,10 @@ func (c *Client) WMClient() *whatsmeow.Client {
 
 // DownloadMedia downloads msg's media to the local cache and returns a cmd that
 // emits MediaDownloadedMsg or MediaDownloadFailedMsg when done.
-func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
+func (c *Client) DownloadMedia(msg core.Message) tea.Cmd {
 	return func() tea.Msg {
 		if msg.DirectPath == "" || len(msg.MediaKey) == 0 {
-			return theme.MediaDownloadFailedMsg{
+			return core.MediaDownloadFailed{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
 				Err:       fmt.Errorf("no download metadata for message %s", msg.ID),
@@ -412,7 +412,7 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 		ext := extFromMime(msg.MimeType)
 		cachePath, err := mediaCachePath(c.mediaDir, msg.ID, ext)
 		if err != nil {
-			return theme.MediaDownloadFailedMsg{
+			return core.MediaDownloadFailed{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
 				Err:       fmt.Errorf("unsafe message ID: %w", err),
@@ -421,7 +421,7 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 
 		// Already cached — return immediately without a network call.
 		if _, err := os.Stat(cachePath); err == nil {
-			return theme.MediaDownloadedMsg{
+			return core.MediaDownloaded{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
 				Path:      cachePath,
@@ -439,7 +439,7 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 			false,
 		)
 		if err != nil {
-			return theme.MediaDownloadFailedMsg{
+			return core.MediaDownloadFailed{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
 				Err:       fmt.Errorf("download: %w", err),
@@ -448,14 +448,14 @@ func (c *Client) DownloadMedia(msg theme.Message) tea.Cmd {
 
 		// 0o600: media files are user-private (may contain personal content).
 		if err := os.WriteFile(cachePath, data, 0o600); err != nil {
-			return theme.MediaDownloadFailedMsg{
+			return core.MediaDownloadFailed{
 				ChatJID:   msg.ChatJID,
 				MessageID: msg.ID,
 				Err:       fmt.Errorf("write cache: %w", err),
 			}
 		}
 
-		return theme.MediaDownloadedMsg{
+		return core.MediaDownloaded{
 			ChatJID:   msg.ChatJID,
 			MessageID: msg.ID,
 			Path:      cachePath,

@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/theme"
 )
 
@@ -29,7 +30,7 @@ type MediaOpenMsg struct {
 
 type Model struct {
 	viewport viewport.Model
-	messages []theme.Message
+	messages []core.Message
 	chatJID  string
 	isGroup  bool
 	width    int
@@ -81,7 +82,7 @@ func (m *Model) SetFocused(focused bool) { m.focused = focused }
 
 func (m Model) Focused() bool { return m.focused }
 
-func (m *Model) SetChat(jid string, isGroup bool, messages []theme.Message) {
+func (m *Model) SetChat(jid string, isGroup bool, messages []core.Message) {
 	m.chatJID = jid
 	m.isGroup = isGroup
 	m.messages = messages
@@ -101,7 +102,7 @@ func (m *Model) SetChat(jid string, isGroup bool, messages []theme.Message) {
 	m.viewport.GotoBottom()
 }
 
-func (m *Model) AppendMessage(msg theme.Message) {
+func (m *Model) AppendMessage(msg core.Message) {
 	if msg.ChatJID != m.chatJID {
 		return
 	}
@@ -115,7 +116,7 @@ func (m *Model) AppendMessage(msg theme.Message) {
 		idx := sort.Search(len(m.messages), func(i int) bool {
 			return m.messages[i].Timestamp.After(msg.Timestamp)
 		})
-		m.messages = append(m.messages, theme.Message{})
+		m.messages = append(m.messages, core.Message{})
 		copy(m.messages[idx+1:], m.messages[idx:])
 		m.messages[idx] = msg
 	}
@@ -128,7 +129,7 @@ func (m *Model) AppendMessage(msg theme.Message) {
 
 // PrependMessages inserts older messages above the current history and adjusts
 // the viewport so the previously-visible content stays in view.
-func (m *Model) PrependMessages(msgs []theme.Message) {
+func (m *Model) PrependMessages(msgs []core.Message) {
 	if len(msgs) == 0 {
 		m.loading = false
 		return
@@ -354,6 +355,6 @@ func (m *Model) rebuildContent() {
 
 // cachedRenderMessage returns the rendered message from cache or renders it fresh.
 // Used by PrependMessages to estimate line counts.
-func (m *Model) cachedRenderMessage(msg theme.Message) string {
+func (m *Model) cachedRenderMessage(msg core.Message) string {
 	return renderMessage(msg, m.width, m.isGroup, false, m.thumbCache)
 }

@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 type Item struct {
-	conversation theme.Conversation
+	conversation core.Conversation
 }
 
-func NewItem(conv theme.Conversation) Item {
+func NewItem(conv core.Conversation) Item {
 	return Item{conversation: conv}
 }
 
@@ -80,6 +80,6 @@ func (i Item) FormatUnread() string {
 	return fmt.Sprintf("%d", i.conversation.UnreadCount)
 }
 
-func (i Item) Conversation() theme.Conversation {
+func (i Item) Conversation() core.Conversation {
 	return i.conversation
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func TestGetMessagesForChatsMergesAliases(t *testing.T) {
@@ -17,7 +17,7 @@ func TestGetMessagesForChatsMergesAliases(t *testing.T) {
 	seedConversation(t, s, pn)
 	seedConversation(t, s, lid)
 
-	if err := s.InsertMessages(ctx, []theme.Message{
+	if err := s.InsertMessages(ctx, []core.Message{
 		{ID: "pn1", ChatJID: pn, Content: "from phone", Timestamp: time.Unix(100, 0)},
 		{ID: "lid1", ChatJID: lid, Content: "from lid", Timestamp: time.Unix(200, 0)},
 	}); err != nil {

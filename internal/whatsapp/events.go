@@ -10,7 +10,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 func (c *Client) handleEvent(rawEvt interface{}) {
@@ -22,33 +22,33 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 	case *events.Connected:
 		jid := c.wm.Store.ID
 		if jid != nil {
-			c.send(theme.ConnectedMsg{JID: *jid})
+			c.send(core.Connected{JID: *jid})
 		}
 		c.SendPresence(true)
 
 	case *events.Disconnected:
-		c.send(theme.DisconnectedMsg{})
+		c.send(core.Disconnected{})
 
 	case *events.LoggedOut:
 		err := fmt.Errorf("logged out: %s", evt.Reason)
 		if c.dbg != nil {
 			c.dbg.Error(err, "whatsmeow logged out", "reason", evt.Reason)
 		}
-		c.send(theme.DisconnectedMsg{Err: err})
+		c.send(core.Disconnected{Err: err})
 
 	case *events.ClientOutdated:
 		if c.dbg != nil {
 			c.dbg.Error(fmt.Errorf("client outdated (405)"), "whatsmeow client version rejected by WhatsApp")
 		}
-		c.send(theme.ClientOutdatedMsg{})
+		c.send(core.ClientOutdated{})
 
 	case *events.QR:
 		if len(evt.Codes) > 0 {
-			c.send(theme.QRCodeMsg{Code: evt.Codes[0]})
+			c.send(core.QRCode{Code: evt.Codes[0]})
 		}
 
 	case *events.PairSuccess:
-		c.send(theme.LoginSuccessMsg{JID: evt.ID})
+		c.send(core.LoginSuccess{JID: evt.ID})
 
 	case *events.Message:
 		c.handleMessage(evt)
@@ -62,7 +62,7 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 			alt = evt.MessageSource.RecipientAlt
 		}
 		chatJID := c.canonicalChatJID(evt.MessageSource.Chat, alt)
-		c.send(theme.TypingMsg{
+		c.send(core.Typing{
 			ChatJID:  chatJID,
 			Sender:   evt.MessageSource.Sender,
 			IsTyping: evt.State == types.ChatPresenceComposing,
@@ -100,7 +100,7 @@ func (c *Client) handleMessage(evt *events.Message) {
 	chatJID := c.canonicalChatFromInfo(evt.Info)
 	senderJID := c.canonicalSenderFromInfo(evt.Info)
 
-	msg := theme.Message{
+	msg := core.Message{
 		ID:         evt.Info.ID,
 		ChatJID:    chatJID.String(),
 		SenderJID:  senderJID.String(),
@@ -128,7 +128,7 @@ func (c *Client) handleMessage(evt *events.Message) {
 		msg.Status = "sent"
 	}
 
-	c.send(theme.NewMessageMsg{Message: msg})
+	c.send(core.NewMessage{Message: msg})
 }
 
 func (c *Client) handleReceipt(evt *events.Receipt) {
@@ -148,7 +148,7 @@ func (c *Client) handleReceipt(evt *events.Receipt) {
 		if msgID == "" {
 			continue
 		}
-		c.send(theme.MessageStatusMsg{
+		c.send(core.MessageStatus{
 			ChatJID:   chatJID,
 			MessageID: string(msgID),
 			Status:    status,
@@ -190,7 +190,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 			}
 		}
 
-		convModel := theme.Conversation{
+		convModel := core.Conversation{
 			JID:     canonicalStr,
 			Name:    name,
 			IsGroup: isGroup,
@@ -204,7 +204,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 		}
 
 		// Process messages in this conversation
-		var messages []theme.Message
+		var messages []core.Message
 		var lastMsg string
 		var lastTime time.Time
 
@@ -234,7 +234,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 			ts := time.Unix(int64(wmi.GetMessageTimestamp()), 0)
 
-			msg := theme.Message{
+			msg := core.Message{
 				ID:        msgInfo.GetID(),
 				ChatJID:   canonicalStr,
 				SenderJID: msgInfo.GetParticipant(),
@@ -278,17 +278,17 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 		// ConversationUpdatedMsg must arrive before MessagesLoadedMsg so that
 		// _foreign_keys=on does not silently drop history rows for new conversations.
-		c.send(theme.ConversationUpdatedMsg{Conversation: convModel})
+		c.send(core.ConversationUpdated{Conversation: convModel})
 
 		if len(messages) > 0 {
-			c.send(theme.MessagesLoadedMsg{
+			c.send(core.MessagesLoaded{
 				ChatJID:  canonical,
 				Messages: messages,
 			})
 		}
 	}
 
-	c.send(theme.HistorySyncCompleteMsg{})
+	c.send(core.HistorySyncComplete{})
 }
 
 // nonDisplayableFields lists waE2E.Message fields (proto names) that carry no

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
 type fakeWAAlt struct {
@@ -26,7 +26,7 @@ func TestResolveConversationJIDUsesAlt(t *testing.T) {
 
 	m, _ := newTestModel(t)
 	m.wa = fakeWAAlt{alts: map[string]string{lid: pn, pn: lid}}
-	m.conversations[pn] = theme.Conversation{JID: pn, Name: "Alice"}
+	m.conversations[pn] = core.Conversation{JID: pn, Name: "Alice"}
 
 	if got := m.resolveConversationJID(lid); got != pn {
 		t.Fatalf("resolveConversationJID(%q) = %q, want %q", lid, got, pn)
@@ -39,11 +39,11 @@ func TestHandleNewMessageResolvesLIDToExistingConversation(t *testing.T) {
 
 	m, s := newTestModel(t)
 	m.wa = fakeWAAlt{alts: map[string]string{lid: pn, pn: lid}}
-	_ = s.UpsertConversation(context.Background(), theme.Conversation{JID: pn, Name: "Alice"})
-	m.conversations[pn] = theme.Conversation{JID: pn, Name: "Alice"}
+	_ = s.UpsertConversation(context.Background(), core.Conversation{JID: pn, Name: "Alice"})
+	m.conversations[pn] = core.Conversation{JID: pn, Name: "Alice"}
 	m.chatView.SetChat(pn, false, nil)
 
-	m, _ = m.handleNewMessage(theme.Message{
+	m, _ = m.handleNewMessage(core.Message{
 		ID:        "live1",
 		ChatJID:   lid,
 		Content:   "hello via lid",
@@ -68,8 +68,8 @@ func TestMergeAliasChatCache(t *testing.T) {
 
 	m, _ := newTestModel(t)
 	m.wa = fakeWAAlt{alts: map[string]string{lid: pn, pn: lid}}
-	m.chatMessages[lid] = []theme.Message{{ID: "m1", ChatJID: lid, Timestamp: time.Unix(1, 0)}}
-	m.chatMessages[pn] = []theme.Message{{ID: "m2", ChatJID: pn, Timestamp: time.Unix(2, 0)}}
+	m.chatMessages[lid] = []core.Message{{ID: "m1", ChatJID: lid, Timestamp: time.Unix(1, 0)}}
+	m.chatMessages[pn] = []core.Message{{ID: "m2", ChatJID: pn, Timestamp: time.Unix(2, 0)}}
 
 	m.mergeAliasChatCache(pn)
 

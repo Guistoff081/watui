@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watui/watui/internal/theme"
+	"github.com/watui/watui/internal/core"
 )
 
-func msgIDs(msgs []theme.Message) []string {
+func msgIDs(msgs []core.Message) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.ID
@@ -19,15 +19,15 @@ func TestAppendMessageInsertsInTimestampOrder(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
 	jid := "x@s.whatsapp.net"
-	m.SetChat(jid, false, []theme.Message{
+	m.SetChat(jid, false, []core.Message{
 		{ID: "a", ChatJID: jid, Timestamp: time.Unix(100, 0)},
 		{ID: "c", ChatJID: jid, Timestamp: time.Unix(300, 0)},
 	})
 
 	// Newest (live) goes to the end.
-	m.AppendMessage(theme.Message{ID: "d", ChatJID: jid, Timestamp: time.Unix(400, 0)})
+	m.AppendMessage(core.Message{ID: "d", ChatJID: jid, Timestamp: time.Unix(400, 0)})
 	// Older (offline replay) is inserted in order, not at the bottom.
-	m.AppendMessage(theme.Message{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)})
+	m.AppendMessage(core.Message{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)})
 
 	want := []string{"a", "b", "c", "d"}
 	if got := msgIDs(m.messages); len(got) != len(want) {
@@ -44,7 +44,7 @@ func TestAppendMessageIgnoresOtherChat(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
 	m.SetChat("x", false, nil)
-	m.AppendMessage(theme.Message{ID: "a", ChatJID: "y", Timestamp: time.Unix(1, 0)})
+	m.AppendMessage(core.Message{ID: "a", ChatJID: "y", Timestamp: time.Unix(1, 0)})
 	if len(m.messages) != 0 {
 		t.Errorf("messages = %v, want empty (other chat ignored)", msgIDs(m.messages))
 	}
@@ -54,7 +54,7 @@ func TestSetChatSortsAndSetsOldest(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
 	jid := "x"
-	m.SetChat(jid, false, []theme.Message{
+	m.SetChat(jid, false, []core.Message{
 		{ID: "c", ChatJID: jid, Timestamp: time.Unix(300, 0)},
 		{ID: "a", ChatJID: jid, Timestamp: time.Unix(100, 0)},
 		{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)},
@@ -75,7 +75,7 @@ func TestUpdateMessageStatus(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
 	jid := "x"
-	m.SetChat(jid, false, []theme.Message{
+	m.SetChat(jid, false, []core.Message{
 		{ID: "a", ChatJID: jid, Timestamp: time.Unix(100, 0), Status: "sending"},
 	})
 	m.UpdateMessageStatus("a", "read")
@@ -86,7 +86,7 @@ func TestUpdateMessageStatus(t *testing.T) {
 
 func TestRenderMessageTextOnlyUnchanged(t *testing.T) {
 	cache := make(map[string]string)
-	msg := theme.Message{
+	msg := core.Message{
 		ID:        "t1",
 		Content:   "hello world",
 		Timestamp: time.Unix(100, 0),
@@ -104,7 +104,7 @@ func TestRenderMessageTextOnlyUnchanged(t *testing.T) {
 
 func TestRenderMessageMediaHasBody(t *testing.T) {
 	cache := make(map[string]string)
-	msg := theme.Message{
+	msg := core.Message{
 		ID:        "img1",
 		MediaType: "image",
 		MimeType:  "image/jpeg",
@@ -126,7 +126,7 @@ func TestRenderMessageMediaHasBody(t *testing.T) {
 
 func TestRenderMessageAudioHasHint(t *testing.T) {
 	cache := make(map[string]string)
-	msg := theme.Message{
+	msg := core.Message{
 		ID:        "aud1",
 		MediaType: "voice",
 		Duration:  95,

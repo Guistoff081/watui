@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"go.mau.fi/whatsmeow/types"
 
+	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/store"
-	"github.com/watui/watui/internal/theme"
 )
 
 // fakeWA is a no-op WAClient for exercising app logic without a real connection.
@@ -26,7 +26,7 @@ func (fakeWA) MarkRead(types.JID, types.JID, []string)            {}
 func (fakeWA) GetAllContactNames() map[string]string              { return nil }
 func (fakeWA) GetGroupNames() map[string]string                   { return nil }
 func (fakeWA) AltChatJID(jid string) string                       { return "" }
-func (fakeWA) DownloadMedia(theme.Message) tea.Cmd                { return nil }
+func (fakeWA) DownloadMedia(core.Message) tea.Cmd                 { return nil }
 func (fakeWA) OpenMedia(string, string) tea.Cmd                   { return nil }
 
 // markReadCall records one MarkRead invocation.
@@ -49,7 +49,7 @@ type recordingWA struct {
 	mu        sync.Mutex
 	alts      map[string]string
 	markReads []markReadCall
-	downloads []theme.Message
+	downloads []core.Message
 	opens     []openMediaCall
 }
 
@@ -70,7 +70,7 @@ func (r *recordingWA) MarkRead(chat, sender types.JID, ids []string) {
 	})
 }
 
-func (r *recordingWA) DownloadMedia(msg theme.Message) tea.Cmd {
+func (r *recordingWA) DownloadMedia(msg core.Message) tea.Cmd {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.downloads = append(r.downloads, msg)

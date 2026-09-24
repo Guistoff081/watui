@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Any base branch, so stacked PRs (base = previous PR's branch) run CI too.
 
 permissions:
   contents: read
@@ -24,6 +24,9 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get install -y gcc
+
+      - name: Gofmt
+        run: test -z "$(gofmt -l ./cmd ./internal)" || (gofmt -l ./cmd ./internal; exit 1)
 
       - name: Vet
         run: go vet ./...
