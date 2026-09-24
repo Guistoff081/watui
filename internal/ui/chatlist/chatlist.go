@@ -175,7 +175,8 @@ func (m Model) View() string {
 	}
 
 	content := strings.Join(lines, "\n")
-	return style.Width(m.width).Height(m.height).Render(content)
+	// MaxHeight clips: a taller panel makes Bubble Tea drop frame lines.
+	return style.Width(m.width).Height(m.height).MaxHeight(m.height).Render(content)
 }
 
 func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {

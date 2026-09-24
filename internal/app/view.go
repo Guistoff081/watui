@@ -46,7 +46,11 @@ func (m Model) View() string {
 }
 
 func (m Model) renderChat() string {
-	body := lipgloss.JoinHorizontal(lipgloss.Top, m.chatList.View(), m.chatView.View())
+	// Clip the body to its row budget so no panel can push the frame past the
+	// terminal height (Bubble Tea would then drop lines, hiding the bars).
+	bodyH := max(1, m.height-2-m.input.Height())
+	body := lipgloss.NewStyle().MaxHeight(bodyH).Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, m.chatList.View(), m.chatView.View()))
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.titleBar.View(),
 		body,

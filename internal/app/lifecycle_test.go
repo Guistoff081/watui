@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -191,5 +193,33 @@ func TestLoadOlderRequestQueriesStore(t *testing.T) {
 func TestSleepThenDeliversMessage(t *testing.T) {
 	if got := sleepThen(time.Millisecond, clearStatusMsg{})(); got != (clearStatusMsg{}) {
 		t.Errorf("sleepThen() = %#v, want clearStatusMsg", got)
+	}
+}
+
+// The frame must be exactly the terminal height: when a panel rendered taller
+// (multi-line previews made the chat list 52 rows in a 45-row terminal) Bubble
+// Tea dropped lines, hiding the title/status bars and the message column.
+func TestViewFillsExactlyTerminalHeight(t *testing.T) {
+	m, s := newTestModel(t)
+	m = send(t, m, core.Connected{})
+	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	var convs []core.Conversation
+	for i := 0; i < 20; i++ {
+		convs = append(convs, core.Conversation{
+			JID:         fmt.Sprintf("55119%08d@s.whatsapp.net", i),
+			Name:        strings.Repeat("Nome comprido ", 5),
+			LastMessage: "linha 1\n\nlinha 2\n📌 linha 3\n" + strings.Repeat("x", 200),
+			LastMsgTime: time.Unix(int64(1000+i), 0),
+		})
+	}
+	for _, c := range convs {
+		_ = s.UpsertConversation(context.Background(), c)
+	}
+	m = send(t, m, conversationsLoadedMsg{Conversations: convs})
+	m = open(t, m, convs[0].JID)
+
+	if got := strings.Count(m.View(), "\n") + 1; got != 30 {
+		t.Fatalf("View() is %d rows, want exactly the terminal height 30", got)
 	}
 }
