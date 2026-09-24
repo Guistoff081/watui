@@ -37,10 +37,10 @@ func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, t
 	var bubbleContent strings.Builder
 
 	// Group sender name
-	if isGroup && !msg.IsFromMe && msg.SenderName != "" {
+	if name := groupSenderLabel(msg); isGroup && !msg.IsFromMe && name != "" {
 		senderColor := getSenderColor(msg.SenderJID)
 		senderStyle := lipgloss.NewStyle().Foreground(senderColor).Bold(true)
-		bubbleContent.WriteString(senderStyle.Render(msg.SenderName))
+		bubbleContent.WriteString(senderStyle.Render(name))
 		bubbleContent.WriteString("\n")
 	}
 
@@ -83,6 +83,18 @@ func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, t
 		return lipgloss.NewStyle().Width(width).Align(lipgloss.Right).Render(bubble)
 	}
 	return bubble
+}
+
+// groupSenderLabel names the sender of a group message: its name, else the
+// formatted phone number. An opaque LID says nothing, so it gets no label.
+func groupSenderLabel(msg core.Message) string {
+	if msg.SenderName != "" {
+		return msg.SenderName
+	}
+	if strings.HasSuffix(msg.SenderJID, "@s.whatsapp.net") {
+		return core.DisplayName(core.Conversation{JID: msg.SenderJID})
+	}
+	return ""
 }
 
 // renderMediaBody returns the inline representation of a media message body.

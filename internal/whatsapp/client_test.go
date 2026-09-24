@@ -732,3 +732,31 @@ func TestGetVerifiedNamesInput(t *testing.T) {
 		t.Error("offline query = nil error, want the usync failure")
 	}
 }
+
+func TestHandleEventGroupMessageUsesContactName(t *testing.T) {
+	c, rec := newStoreClient(t)
+	if err := c.wm.Store.Contacts.PutContactName(context.Background(), testPN, "Ana", "Ana Agenda"); err != nil {
+		t.Fatal(err)
+	}
+	group := types.NewJID("120363000000", types.GroupServer)
+	for _, sender := range []types.JID{testPN, types.NewJID("5511900000000", types.DefaultUserServer)} {
+		c.handleEvent(&events.Message{
+			Info: types.MessageInfo{
+				MessageSource: types.MessageSource{Chat: group, Sender: sender, IsGroup: true},
+				ID:            types.MessageID("G-" + sender.User),
+				PushName:      "~push",
+			},
+			Message: &waProto.Message{Conversation: proto.String("oi")},
+		})
+	}
+	got := rec.take()
+	if len(got) != 2 {
+		t.Fatalf("events = %#v", got)
+	}
+	if n := got[0].(core.NewMessage).Message.SenderName; n != "Ana Agenda" {
+		t.Errorf("saved contact sender = %q, want the address-book name", n)
+	}
+	if n := got[1].(core.NewMessage).Message.SenderName; n != "~push" {
+		t.Errorf("unsaved sender = %q, want the push name", n)
+	}
+}

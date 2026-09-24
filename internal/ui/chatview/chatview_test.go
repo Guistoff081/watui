@@ -354,3 +354,15 @@ func TestPrependKeepsPreviousTopMessageAnchored(t *testing.T) {
 		t.Errorf("previous top message moved from row %d to row %d after prepend", beforeRow, got)
 	}
 }
+
+// A group message with no known sender name still says who sent it.
+func TestRenderGroupMessageFallsBackToSenderNumber(t *testing.T) {
+	msg := core.Message{ID: "g", Content: "oi", SenderJID: "5511955556666@s.whatsapp.net", Timestamp: time.Unix(0, 0)}
+	if out := stripANSI(renderMessage(msg, 80, true, false, map[string]string{})); !strings.Contains(out, "+55 11 95555-6666") {
+		t.Errorf("group bubble has no sender label:\n%s", out)
+	}
+	lid := core.Message{ID: "l", Content: "oi", SenderJID: "998877@lid", Timestamp: time.Unix(0, 0)}
+	if out := stripANSI(renderMessage(lid, 80, true, false, map[string]string{})); strings.Contains(out, "@lid") {
+		t.Errorf("raw LID shown as sender:\n%s", out)
+	}
+}

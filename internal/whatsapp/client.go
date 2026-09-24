@@ -334,6 +334,9 @@ func (c *Client) SendChatPresence(ctx context.Context, jid types.JID, composing 
 // contact store, or "" when unknown. Contacts are keyed by phone-number JID, so
 // LID (@lid) JIDs are first mapped back to their phone number before lookup.
 func (c *Client) GetContactName(ctx context.Context, jid types.JID) string {
+	if c.wm == nil || c.wm.Store == nil || c.wm.Store.Contacts == nil {
+		return "" // not paired yet: no contact store
+	}
 	lookup := jid
 	if jid.Server == types.HiddenUserServer {
 		if pn, err := c.wm.Store.LIDs.GetPNForLID(ctx, jid); err == nil && pn.User != "" {

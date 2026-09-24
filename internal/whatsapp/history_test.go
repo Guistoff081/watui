@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -361,5 +362,23 @@ func TestConvertHistoryConversationPrefersVerifiedBusinessName(t *testing.T) {
 	got, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{})
 	if got.Name != "Jeitto" || msgs[0].SenderName != "Jeitto" {
 		t.Errorf("name = %q, sender = %q; want verified business name Jeitto", got.Name, msgs[0].SenderName)
+	}
+}
+
+func TestConvertHistoryConversationGroupSenderFromContacts(t *testing.T) {
+	text := &waProto.Message{Conversation: proto.String("oi")}
+	conv := historyConv("123@g.us",
+		histMsg{id: "p", ts: 1, participant: "5511911112222@s.whatsapp.net", pushName: "Push", msg: text},
+		histMsg{id: "c", ts: 2, participant: "5511933334444@s.whatsapp.net", msg: text},
+		histMsg{id: "u", ts: 3, participant: "5511955556666@s.whatsapp.net", msg: text},
+	)
+	_, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{
+		contacts: map[string]string{"5511933334444@s.whatsapp.net": "Carla", "5511911112222@s.whatsapp.net": "Agenda"},
+	})
+	got := []string{msgs[0].SenderName, msgs[1].SenderName, msgs[2].SenderName}
+	// Like WhatsApp: the address-book name wins in groups, the sender's own
+	// push name is the fallback.
+	if want := []string{"Agenda", "Carla", ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sender names = %q, want %q (contact name, else push name)", got, want)
 	}
 }
