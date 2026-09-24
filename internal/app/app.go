@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -89,8 +88,10 @@ type Model struct {
 	connectedJID string
 	lastErr      error
 
-	chatMessages  map[string][]core.Message
-	conversations map[string]core.Conversation
+	// chats owns conversation/message state and its rules; Model only
+	// translates the returned effects into UI updates, store writes and
+	// WhatsApp calls.
+	chats *core.Chats
 
 	// Typing indicator state
 	isTyping  bool
@@ -109,19 +110,18 @@ type Model struct {
 
 func NewModel(wa WAClient, s *store.Store, version string, log *debug.Logger) Model {
 	return Model{
-		state:         StateAuth,
-		wa:            wa,
-		store:         s,
-		log:           log,
-		focus:         PanelChatList,
-		auth:          auth.New(),
-		chatList:      chatlist.New(),
-		chatView:      chatview.New(),
-		input:         input.New(),
-		titleBar:      titlebar.New(),
-		statusBar:     statusbar.New(version),
-		chatMessages:  make(map[string][]core.Message),
-		conversations: make(map[string]core.Conversation),
+		state:     StateAuth,
+		wa:        wa,
+		store:     s,
+		log:       log,
+		focus:     PanelChatList,
+		auth:      auth.New(),
+		chatList:  chatlist.New(),
+		chatView:  chatview.New(),
+		input:     input.New(),
+		titleBar:  titlebar.New(),
+		statusBar: statusbar.New(version),
+		chats:     core.NewChats(wa),
 	}
 }
 
@@ -224,68 +224,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Conversations ---
 	case conversationsLoadedMsg:
+		m.chats.Load(msg.Conversations)
 		for _, conv := range msg.Conversations {
-			m.conversations[conv.JID] = conv
 			m.chatList.UpsertConversation(conv)
 		}
 		m.statusBar.ClearMessage()
 
 	case contactNamesMsg:
-		for jid, name := range msg.Names {
-			if conv, ok := m.conversations[jid]; ok {
-				if name != "" && (conv.Name == "" || conv.Name == conv.JID) {
-					conv.Name = name
-					m.conversations[jid] = conv
-					m.chatList.UpsertConversation(conv)
-					_ = m.store.UpsertConversation(context.Background(), conv)
-				}
-			}
-		}
+		m.applyEffects(m.chats.ApplyNames(msg.Names))
 
 	case core.ConversationUpdated:
-		jid := msg.Conversation.JID
-		updated := msg.Conversation
-		if existing, ok := m.conversations[jid]; ok {
-			// History sync may send a conversation update whose Last* is computed
-			// only from the (limited) messages in that sync payload. Do not regress
-			// the preview we have from live messages or prior state.
-			if !updated.LastMsgTime.After(existing.LastMsgTime) {
-				updated.LastMessage = existing.LastMessage
-				updated.LastMsgTime = existing.LastMsgTime
-			}
-		}
-		m.conversations[jid] = updated
-		m.chatList.UpsertConversation(updated)
-		_ = m.store.UpsertConversation(context.Background(), updated)
+		m.applyEffects(m.chats.UpdateConversation(msg.Conversation))
 
 	case core.MessagesLoaded:
-		jid := m.resolveConversationJID(msg.ChatJID.String())
-		m.mergeAliasChatCache(jid)
 		// Merge (don't overwrite): history-sync batches can arrive after live
-		// messages, and must not discard them. Dedupe by ID and keep ascending order.
-		merged := mergeMessages(m.chatMessages[jid], msg.Messages)
-		m.chatMessages[jid] = merged
-		_ = m.store.InsertMessages(context.Background(), msg.Messages)
-		// If the loaded history batch contains a message newer than our current
-		// preview, advance the conversation last so list/preview is up to date.
-		if len(msg.Messages) > 0 {
-			latest := msg.Messages[0]
-			for _, m := range msg.Messages {
-				if m.Timestamp.After(latest.Timestamp) {
-					latest = m
-				}
-			}
-			if conv, ok := m.conversations[jid]; ok && latest.Timestamp.After(conv.LastMsgTime) {
-				conv.LastMessage = latest.PreviewText()
-				conv.LastMsgTime = latest.Timestamp
-				m.conversations[jid] = conv
-				m.chatList.UpsertConversation(conv)
-				_ = m.store.UpsertConversation(context.Background(), conv)
-			}
-		}
-		if m.chatView.ChatJID() == jid {
-			conv := m.conversations[jid]
-			m.chatView.SetChat(jid, conv.IsGroup, merged)
+		// messages, and must not discard them.
+		eff := m.chats.AddHistory(msg.ChatJID.String(), msg.Messages, m.chatView.ChatJID())
+		m.applyEffects(eff)
+		if eff.InView {
+			m.reloadChatView(eff.Chat)
 		}
 
 	case core.HistorySyncComplete:
@@ -299,13 +256,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadOlderMessagesCmd(msg.ChatJID))
 
 	case olderMessagesLoadedMsg:
-		if len(msg.Messages) == 0 {
+		eff := m.chats.PrependOlder(msg.ChatJID, msg.Messages, m.chatView.ChatJID())
+		if eff.NoOlder {
 			m.chatView.SetNoMoreMessages()
-		} else {
-			m.chatMessages[msg.ChatJID] = append(msg.Messages, m.chatMessages[msg.ChatJID]...)
-			if m.chatView.ChatJID() == msg.ChatJID {
-				m.chatView.PrependMessages(msg.Messages)
-			}
+		} else if eff.InView {
+			m.chatView.PrependMessages(eff.Prepend)
 		}
 
 	// --- Chat selection ---
@@ -501,7 +456,7 @@ func (m *Model) applyFocus() {
 // --- Chat selection ---
 
 func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
-	conv, ok := m.conversations[jid]
+	conv, ok := m.chats.Conversation(jid)
 	if !ok {
 		return *m, nil
 	}
@@ -509,150 +464,68 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 	m.titleBar.SetChat(conv.Name, conv.JID, conv.IsGroup)
 
 	// Always merge the persisted recent history with whatever is cached in memory
-	// (live + offline-sync messages), deduped and time-ordered. Relying on the
-	// cache alone could show only a handful of offline-synced messages.
-	stored, _ := m.store.GetMessagesForChats(context.Background(), m.chatJIDAliases(jid), 200)
-	m.mergeAliasChatCache(jid)
-	messages := mergeMessages(m.chatMessages[jid], stored)
-	m.chatMessages[jid] = messages
-	m.chatView.SetChat(jid, conv.IsGroup, messages)
+	// (live + offline-sync messages). Relying on the cache alone could show only
+	// a handful of offline-synced messages.
+	stored, _ := m.store.GetMessagesForChats(context.Background(), m.chats.Aliases(jid), 200)
+	eff, _ := m.chats.Open(jid, stored)
+	m.reloadChatView(jid)
+	m.applyEffects(eff)
 
-	// Ensure the conversation preview reflects the actual newest message we just
-	// loaded (defensive against any stale data from history sync etc).
-	if len(messages) > 0 {
-		last := messages[len(messages)-1]
-		if last.Timestamp.After(conv.LastMsgTime) {
-			conv.LastMessage = last.PreviewText()
-			conv.LastMsgTime = last.Timestamp
-			m.conversations[jid] = conv
-			m.chatList.UpsertConversation(conv)
-			_ = m.store.UpsertConversation(context.Background(), conv)
-		}
+	var cmds []tea.Cmd
+	for _, msg := range eff.Downloads {
+		cmds = append(cmds, m.wa.DownloadMedia(msg))
 	}
-
-	// Capture the unread count before clearing it: it bounds how many of the
-	// newest incoming messages still need a read receipt.
-	unread := conv.UnreadCount
-	conv.UnreadCount = 0
-	m.conversations[jid] = conv
-	m.chatList.ClearUnread(jid)
-	_ = m.store.ClearUnread(context.Background(), jid)
-
-	// Send read receipts to WhatsApp for the messages that were unread.
-	m.markChatRead(jid, conv.IsGroup, messages, unread)
-
-	// Auto-download sticker files for the visible window (stickers have no embedded
-	// thumbnail, so they need the full file before a half-block preview can render).
-	var stickerCmds []tea.Cmd
-	for _, msg := range stickersToAutoDownload(messages, stickerAutoDownloadCap) {
-		stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
-	}
-
-	focusCmd := m.setFocus(PanelMessages)
-	return *m, tea.Batch(append(stickerCmds, focusCmd)...)
+	cmds = append(cmds, m.setFocus(PanelMessages))
+	return *m, tea.Batch(cmds...)
 }
 
-// markChatRead sends read receipts for the newest unread incoming messages
-// (messages is ascending by time). Already-read history is not re-sent.
-func (m *Model) markChatRead(jid string, isGroup bool, messages []core.Message, unread int) {
-	parsedJID, err := types.ParseJID(jid)
-	if err != nil || len(messages) == 0 || unread <= 0 {
-		return
+// applyEffects performs the store writes, chat-list updates and read receipts
+// a core.Chats operation asked for. View changes are left to the caller since
+// they depend on the operation.
+func (m *Model) applyEffects(eff core.Effects) {
+	ctx := context.Background()
+	if len(eff.Messages) > 0 {
+		_ = m.store.InsertMessages(ctx, eff.Messages)
 	}
+	for _, conv := range eff.Conversations {
+		m.chatList.UpsertConversation(conv)
+		_ = m.store.UpsertConversation(ctx, conv)
+	}
+	for _, jid := range eff.ClearUnread {
+		m.chatList.ClearUnread(jid)
+		_ = m.store.ClearUnread(ctx, jid)
+	}
+	m.sendReceipts(eff.Receipts)
+}
 
-	// Walk back from the newest message to find where the unread tail begins.
-	start := len(messages)
-	for n := 0; start > 0 && n < unread; {
-		start--
-		if !messages[start].IsFromMe {
-			n++
+// sendReceipts forwards read receipts to WhatsApp, skipping unparsable JIDs.
+func (m *Model) sendReceipts(receipts []core.Receipt) {
+	for _, r := range receipts {
+		chat, err := types.ParseJID(r.Chat)
+		if err != nil {
+			continue
 		}
+		sender, err := types.ParseJID(r.Sender)
+		if err != nil {
+			continue
+		}
+		m.wa.MarkRead(chat, sender, r.IDs)
 	}
-	messages = messages[start:]
+}
 
-	if isGroup {
-		// Group chats require per-sender receipts.
-		bySender := make(map[string][]string)
-		for _, msg := range messages {
-			if !msg.IsFromMe && msg.SenderJID != "" {
-				bySender[msg.SenderJID] = append(bySender[msg.SenderJID], msg.ID)
-			}
-		}
-		for senderStr, ids := range bySender {
-			if senderJID, err := types.ParseJID(senderStr); err == nil {
-				m.wa.MarkRead(parsedJID, senderJID, ids)
-			}
-		}
-	} else {
-		var ids []string
-		for _, msg := range messages {
-			if !msg.IsFromMe {
-				ids = append(ids, msg.ID)
-			}
-		}
-		if len(ids) > 0 {
-			m.wa.MarkRead(parsedJID, parsedJID, ids)
-		}
-	}
+// reloadChatView shows jid's cached messages in the chat view.
+func (m *Model) reloadChatView(jid string) {
+	conv, _ := m.chats.Conversation(jid)
+	m.chatView.SetChat(jid, conv.IsGroup, m.chats.Messages(jid))
 }
 
 // --- Message handlers ---
 
 func (m *Model) handleNewMessage(msg core.Message) (Model, tea.Cmd) {
-	jid := m.resolveConversationJID(msg.ChatJID)
-	msg.ChatJID = jid
-	m.mergeAliasChatCache(jid)
-
-	// WhatsApp can deliver the same message more than once — e.g. a group stanza
-	// that carries both a sender-key distribution (pkmsg) and the content (skmsg)
-	// is decrypted and dispatched twice. Drop duplicates by ID so they don't
-	// appear twice or double-count as unread.
-	for _, existing := range m.chatMessages[jid] {
-		if existing.ID == msg.ID {
-			return *m, nil
-		}
-	}
-
-	m.chatMessages[jid] = insertMessageSorted(m.chatMessages[jid], msg)
-	_ = m.store.InsertMessage(context.Background(), msg)
-
-	conv, ok := m.conversations[jid]
-	if !ok {
-		name := msg.SenderName
-		if name == "" {
-			name = jid
-		}
-		conv = core.Conversation{
-			JID:     jid,
-			Name:    name,
-			IsGroup: strings.HasSuffix(jid, "@g.us"),
-		}
-		m.conversations[jid] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
-		ok = true
-	}
-	if ok {
-		// Don't let an older (offline-replayed) message overwrite a newer preview.
-		if msg.Timestamp.After(conv.LastMsgTime) {
-			conv.LastMessage = msg.PreviewText()
-			conv.LastMsgTime = msg.Timestamp
-		}
-		// Own messages (sent from another device) are never unread.
-		if !msg.IsFromMe && m.resolveConversationJID(m.chatView.ChatJID()) != jid {
-			conv.UnreadCount++
-		}
-		m.conversations[jid] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
-	}
-
-	if m.resolveConversationJID(m.chatView.ChatJID()) == jid {
+	eff := m.chats.AddMessage(msg, m.chatView.ChatJID())
+	m.applyEffects(eff)
+	for _, msg := range eff.Append {
 		m.chatView.AppendMessage(msg)
-		// The user is looking at this chat, so the message is read on arrival.
-		if !msg.IsFromMe {
-			m.markChatRead(jid, conv.IsGroup, []core.Message{msg}, 1)
-		}
 	}
 	return *m, nil
 }
@@ -660,23 +533,11 @@ func (m *Model) handleNewMessage(msg core.Message) (Model, tea.Cmd) {
 // setMessageStatus updates a message's status in the in-memory cache, the open
 // chat view, and the persistent store, keyed by message ID.
 func (m *Model) setMessageStatus(chatJID, msgID, status string) {
-	if msgID == "" {
+	eff, ok := m.chats.SetStatus(chatJID, msgID, status, m.chatView.ChatJID())
+	if !ok {
 		return
 	}
-	chatJID = m.resolveConversationJID(chatJID)
-	m.mergeAliasChatCache(chatJID)
-
-	msgs := m.chatMessages[chatJID]
-	for i := range msgs {
-		if msgs[i].ID == msgID {
-			msgs[i].Status = status
-			break
-		}
-	}
-	m.chatMessages[chatJID] = msgs
-
-	viewJID := m.resolveConversationJID(m.chatView.ChatJID())
-	if viewJID == chatJID {
+	if eff.InView {
 		m.chatView.UpdateMessageStatus(msgID, status)
 	}
 	_ = m.store.UpdateMessageStatus(context.Background(), msgID, status)
@@ -686,30 +547,18 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) {
 // path, invalidates the chatview thumbnail cache, and opens the media if this
 // download was triggered by a pending user open/play request.
 func (m *Model) handleMediaDownloaded(msg core.MediaDownloaded) tea.Cmd {
-	jid := m.resolveConversationJID(msg.ChatJID)
-	msgs := m.chatMessages[jid]
-	for i := range msgs {
-		if msgs[i].ID == msg.MessageID {
-			msgs[i].MediaPath = msg.Path
-			break
-		}
-	}
-	m.chatMessages[jid] = msgs
-
-	_ = m.store.UpdateMessageMediaPath(context.Background(), jid, msg.MessageID, msg.Path)
+	eff := m.chats.SetMediaPath(msg.ChatJID, msg.MessageID, msg.Path, m.chatView.ChatJID())
+	_ = m.store.UpdateMessageMediaPath(context.Background(), eff.Chat, msg.MessageID, msg.Path)
 
 	m.chatView.InvalidateThumbnail(msg.MessageID)
-	if m.chatView.ChatJID() == jid {
-		conv := m.conversations[jid]
-		m.chatView.SetChat(jid, conv.IsGroup, msgs)
+	if eff.InView {
+		m.reloadChatView(eff.Chat)
 	}
 
 	if m.pendingOpenMsgID == msg.MessageID {
 		m.pendingOpenMsgID = ""
-		for _, cached := range msgs {
-			if cached.ID == msg.MessageID {
-				return m.wa.OpenMedia(msg.Path, cached.MediaType)
-			}
+		if cached, ok := m.chats.Find(eff.Chat, msg.MessageID); ok {
+			return m.wa.OpenMedia(msg.Path, cached.MediaType)
 		}
 	}
 	return nil
@@ -734,41 +583,18 @@ func (m *Model) handleMediaDownloadFailed(msg core.MediaDownloadFailed) tea.Cmd 
 	return clearStatusAfterDelay(4 * time.Second)
 }
 
-// stickerAutoDownloadCap bounds how many sticker downloads selectChat starts.
-const stickerAutoDownloadCap = 10
-
-// stickersToAutoDownload returns up to limit stickers that still need their file
-// downloaded, newest first. msgs is time-ascending, so walking backwards favours
-// the stickers visible at the bottom of the chat.
-func stickersToAutoDownload(msgs []core.Message, limit int) []core.Message {
-	var out []core.Message
-	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
-		msg := msgs[i]
-		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
-			out = append(out, msg)
-		}
-	}
-	return out
-}
-
 // handleMediaOpen opens or downloads-then-opens the media for the selected message.
 func (m *Model) handleMediaOpen(chatJID, msgID string) tea.Cmd {
-	jid := m.resolveConversationJID(chatJID)
-	for _, msg := range m.chatMessages[jid] {
-		if msg.ID != msgID {
-			continue
-		}
-		if msg.MediaType == "" {
-			return nil
-		}
-		if msg.MediaPath != "" {
-			return m.wa.OpenMedia(msg.MediaPath, msg.MediaType)
-		}
-		// Not yet downloaded — start download; open on completion.
-		m.pendingOpenMsgID = msgID
-		return m.wa.DownloadMedia(msg)
+	msg, ok := m.chats.Find(chatJID, msgID)
+	if !ok || msg.MediaType == "" {
+		return nil
 	}
-	return nil
+	if msg.MediaPath != "" {
+		return m.wa.OpenMedia(msg.MediaPath, msg.MediaType)
+	}
+	// Not yet downloaded — start download; open on completion.
+	m.pendingOpenMsgID = msgID
+	return m.wa.DownloadMedia(msg)
 }
 
 // addOutgoingMessage records an optimistic outgoing message in the cache, view,
@@ -782,17 +608,11 @@ func (m *Model) addOutgoingMessage(chatJID, id, content string) core.Message {
 		IsFromMe:  true,
 		Status:    "sending",
 	}
-	m.chatMessages[chatJID] = append(m.chatMessages[chatJID], msg)
-	m.chatView.AppendMessage(msg)
-	_ = m.store.InsertMessage(context.Background(), msg)
-
-	if conv, ok := m.conversations[chatJID]; ok {
-		conv.LastMessage = content
-		conv.LastMsgTime = msg.Timestamp
-		m.conversations[chatJID] = conv
-		m.chatList.UpsertConversation(conv)
-		_ = m.store.UpsertConversation(context.Background(), conv)
+	eff := m.chats.AddOutgoing(msg)
+	for _, msg := range eff.Append {
+		m.chatView.AppendMessage(msg)
 	}
+	m.applyEffects(eff)
 	return msg
 }
 
@@ -869,83 +689,6 @@ func (m *Model) handleSendAudio(path string) (Model, tea.Cmd) {
 
 // --- Commands ---
 
-// resolveConversationJID maps an incoming chat JID to the key used in m.conversations,
-// trying the LID↔PN alternate when the direct key is missing.
-func (m *Model) resolveConversationJID(jid string) string {
-	if jid == "" {
-		return jid
-	}
-	if _, ok := m.conversations[jid]; ok {
-		return jid
-	}
-	if alt := m.wa.AltChatJID(jid); alt != "" {
-		if _, ok := m.conversations[alt]; ok {
-			return alt
-		}
-	}
-	return jid
-}
-
-// chatJIDAliases returns jid and its LID↔PN alternate (if known) for cache/store lookups.
-func (m *Model) chatJIDAliases(jid string) []string {
-	if jid == "" {
-		return nil
-	}
-	aliases := []string{jid}
-	if alt := m.wa.AltChatJID(jid); alt != "" && alt != jid {
-		aliases = append(aliases, alt)
-	}
-	return aliases
-}
-
-// mergeAliasChatCache folds messages cached under an alternate JID into the canonical key.
-func (m *Model) mergeAliasChatCache(canonical string) {
-	for _, alias := range m.chatJIDAliases(canonical) {
-		if alias == canonical {
-			continue
-		}
-		if msgs, ok := m.chatMessages[alias]; ok {
-			m.chatMessages[canonical] = mergeMessages(m.chatMessages[canonical], msgs)
-			delete(m.chatMessages, alias)
-		}
-	}
-}
-
-// mergeMessages combines message lists into a single slice, de-duplicating by ID
-// (earlier lists win, so cached/live state isn't clobbered by history) and sorting
-// ascending by timestamp for display.
-func mergeMessages(lists ...[]core.Message) []core.Message {
-	seen := make(map[string]struct{})
-	var out []core.Message
-	for _, list := range lists {
-		for _, msg := range list {
-			if msg.ID != "" {
-				if _, ok := seen[msg.ID]; ok {
-					continue
-				}
-				seen[msg.ID] = struct{}{}
-			}
-			out = append(out, msg)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].Timestamp.Before(out[j].Timestamp)
-	})
-	return out
-}
-
-// insertMessageSorted inserts msg into a time-ascending slice at the correct
-// position, so offline-replayed messages with older timestamps land in order.
-func insertMessageSorted(msgs []core.Message, msg core.Message) []core.Message {
-	idx := sort.Search(len(msgs), func(i int) bool {
-		return msgs[i].Timestamp.After(msg.Timestamp)
-	})
-	msgs = append(msgs, core.Message{})
-	copy(msgs[idx+1:], msgs[idx:])
-	msgs[idx] = msg
-	return msgs
-}
-
 func (m Model) loadConversationsCmd() tea.Cmd {
 	return func() tea.Msg {
 		convs, err := m.store.GetAllConversations(context.Background())
@@ -970,7 +713,7 @@ func (m Model) loadContactNamesCmd() tea.Cmd {
 }
 
 func (m Model) loadOlderMessagesCmd(chatJID string) tea.Cmd {
-	msgs := m.chatMessages[chatJID]
+	msgs := m.chats.Messages(chatJID)
 	if len(msgs) == 0 {
 		return nil
 	}
