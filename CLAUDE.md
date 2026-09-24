@@ -32,13 +32,16 @@ This is a WhatsApp TUI client built with Go + Bubble Tea + whatsmeow. It follows
 
 ### Event bridge: whatsmeow → Bubble Tea
 
-The central design challenge is connecting whatsmeow's event-driven WebSocket model to Bubble Tea's MVU loop. The bridge is `program.Send` passed as a callback:
+The central design challenge is connecting whatsmeow's event-driven WebSocket model to Bubble Tea's MVU loop. `internal/whatsapp` knows nothing about Bubble Tea; the bridge has two halves:
 
 ```
-whatsmeow WebSocket → internal/whatsapp/events.go → client.send(tea.Msg) → program.Send() → app.Update()
+events:   whatsmeow WebSocket → internal/whatsapp/events.go → client.send(core.Event) → event handler → program.Send() → app.Update()
+commands: app.Update() → WAClient (internal/app/waadapter.go, tea.Cmd) → whatsapp.Client sync call (ctx, returns result/error) → core event as tea.Msg
 ```
 
-`whatsapp.Client` holds a `sendMsg func(tea.Msg)` that is nil until `SetSendMsg` is called in `main.go` after `tea.NewProgram` is created but before `program.Run()`.
+- **Events**: `whatsapp.Client` holds an `onEvent func(core.Event)` that is nil until `SetEventHandler` is called in `main.go` (after `tea.NewProgram`, before `program.Run()`) with `func(e core.Event) { program.Send(e) }`. Every `core.Event` is also a valid `tea.Msg`.
+- **Commands**: the client's operations are synchronous and take a `context.Context` (`Connect(ctx) error`, `SendText/SendFile/SendAudio(ctx, jid, id, …) (core.MessageSent, error)`, `DownloadMedia(ctx, msg) (path, error)`, `OpenMedia(path, type) error`, `MarkRead`, `SendChatPresence`, `GetAllContactNames`, `GetGroupNames`, `AltChatJID`). `app.NewWAClient` wraps them in `tea.Cmd`s implementing the app's `WAClient` interface and maps results to events: send error → `core.MessageSendFailed`, download → `core.MediaDownloaded`/`core.MediaDownloadFailed`, connect → `nil`, a bare `error` for `*whatsapp.ConnectError` (socket never came up before QR), or `core.LoginFailed`. The adapter depends on a small unexported interface, so it is tested with a fake.
+- During the QR flow `Connect` blocks while emitting `core.QRCode`/`core.QRTimeout` through the event handler.
 
 ### Package layout
 
@@ -66,10 +69,10 @@ Title bar (1 line) + horizontal body (chat list 30% | message view 70%) + input 
 ### Startup sequence
 
 1. Parse flags → open both SQLite databases
-2. Create `whatsapp.Client` (sendMsg = nil)
-3. Create `app.Model` → `tea.NewProgram`
-4. `waClient.SetSendMsg(program.Send)`
-5. `program.Run()` → `Init()` calls `waClient.Connect()` (starts QR flow if not logged in)
+2. Create `whatsapp.Client` (no event handler yet)
+3. Create `app.Model` with `app.NewWAClient(waClient)` → `tea.NewProgram`
+4. `waClient.SetEventHandler(func(e core.Event) { program.Send(e) })`
+5. `program.Run()` → `Init()` runs the adapter's `Connect()` cmd, which calls `waClient.Connect(ctx)` (starts QR flow if not logged in)
 
 ## Notes
 
