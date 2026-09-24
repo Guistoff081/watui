@@ -250,3 +250,41 @@ func TestConvertHistoryConversationUnwrapsDisappearing(t *testing.T) {
 		t.Errorf("last message preview = %q", got.LastMessage)
 	}
 }
+
+// Senders are keyed like live messages: group participants lose their device
+// suffix, and 1:1 incoming messages are attributed to the canonical chat.
+func TestConvertHistoryConversationCanonicalSender(t *testing.T) {
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lidChat := "123456789@lid"
+	r := &fakeHistoryResolver{canonical: map[string]types.JID{
+		lidChat:           pn,
+		"123456789:7@lid": pn,
+	}}
+
+	group := historyConv("120363000000000000@g.us",
+		histMsg{id: "g1", ts: 1, participant: "5511777777777:12@s.whatsapp.net", msg: text("a")},
+		histMsg{id: "g2", ts: 2, participant: "111111111@lid", msg: text("b")},
+	)
+	// WebMessageInfo.participant takes precedence over the key's, as in
+	// whatsmeow's ParseWebMessage.
+	group.Messages[1].Message.Participant = proto.String("987654321:4@lid")
+
+	_, msgs, _ := convertHistoryConversation(group, r)
+	if got := msgs[0].SenderJID; got != "5511777777777@s.whatsapp.net" {
+		t.Errorf("group sender = %q, want device suffix dropped", got)
+	}
+	if got := msgs[1].SenderJID; got != "987654321@lid" {
+		t.Errorf("group sender = %q, want WebMessageInfo participant without device", got)
+	}
+
+	direct := historyConv(lidChat,
+		histMsg{id: "d1", ts: 1, msg: text("sem participant")},
+		histMsg{id: "d2", ts: 2, participant: "123456789:7@lid", msg: text("com participant")},
+	)
+	_, msgs, _ = convertHistoryConversation(direct, r)
+	for _, m := range msgs {
+		if m.SenderJID != pn.String() {
+			t.Errorf("%s: 1:1 sender = %q, want canonical chat %s", m.ID, m.SenderJID, pn)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -243,16 +244,12 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 		msg := newCoreMessage(content)
 		msg.ID = key.GetID()
 		msg.ChatJID = canonicalStr
-		msg.SenderJID = key.GetParticipant()
+		msg.SenderJID = historySender(wmi, canonical)
 		msg.Timestamp = time.Unix(int64(wmi.GetMessageTimestamp()), 0)
 		msg.IsFromMe = key.GetFromMe()
 		msg.Status = "received"
-
 		if msg.IsFromMe {
 			msg.Status = "read"
-			if msg.SenderJID == "" {
-				msg.SenderJID = canonicalStr
-			}
 		}
 
 		messages = append(messages, msg)
@@ -264,6 +261,31 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 	}
 
 	return convModel, messages, true
+}
+
+// historySender returns the SenderJID for a history message in chat, keyed the
+// same way live messages are: 1:1 and newsletter messages are attributed to the
+// canonical chat (whatsmeow's ParseWebMessage uses the chat as sender there),
+// group and broadcast messages to the participant without its device suffix.
+// Own messages keep their participant when present and otherwise fall back to
+// the chat, as before.
+func historySender(wmi *waWeb.WebMessageInfo, chat types.JID) string {
+	participant := wmi.GetParticipant()
+	if participant == "" {
+		participant = wmi.GetKey().GetParticipant()
+	}
+	fromMe := wmi.GetKey().GetFromMe()
+
+	switch {
+	case fromMe && participant == "":
+		return chat.String()
+	case !fromMe && !(chat.Server == types.GroupServer || chat.Server == types.BroadcastServer):
+		return chat.String()
+	}
+	if jid, err := types.ParseJID(participant); err == nil {
+		return jid.ToNonAD().String()
+	}
+	return participant
 }
 
 // unwrapMessage strips the container messages WhatsApp wraps real content in
