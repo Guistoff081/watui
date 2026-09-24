@@ -85,6 +85,9 @@ The log captures Bubble Tea message flow, whatsmeow events at DEBUG level, error
 | Key | Context | Action |
 |---|---|---|
 | `Tab` / `Shift+Tab` | Global | Cycle focus between panels |
+| `Space` | Chat list / messages | Leader: opens the command popup |
+| `Space a f` / `a a` / `a o` | Chat list / messages | Attach file / audio / GUI picker |
+| `Space ?` | Chat list / messages | All keybindings |
 | `j` / `↓` | Chat list | Next conversation |
 | `k` / `↑` | Chat list | Previous conversation |
 | `Enter` | Chat list | Open conversation |

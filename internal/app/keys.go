@@ -28,6 +28,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Routing order: overlay, then an active leader sequence, then insert
+	// mode (Space types), then Space starting the leader in normal mode.
+	if m.overlay != nil {
+		var cmd tea.Cmd
+		m.overlay, cmd = m.overlay.Update(msg)
+		return m, cmd
+	}
+	if m.leader != nil {
+		return m.handleLeaderKey(msg)
+	}
+	if key == " " && m.focus != PanelInput {
+		m.leader = []string{}
+		return m, nil
+	}
+
 	if m.focus == PanelInput {
 		switch key {
 		case "tab":

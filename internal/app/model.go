@@ -17,6 +17,7 @@ import (
 	"github.com/watui/watui/internal/ui/auth"
 	"github.com/watui/watui/internal/ui/chatlist"
 	"github.com/watui/watui/internal/ui/chatview"
+	"github.com/watui/watui/internal/ui/commands"
 	"github.com/watui/watui/internal/ui/input"
 	"github.com/watui/watui/internal/ui/statusbar"
 	"github.com/watui/watui/internal/ui/titlebar"
@@ -161,6 +162,12 @@ type Model struct {
 	// historyAsked records, per chat, which oldest message the phone was last
 	// asked to page back from and when (see olderFromPhone).
 	historyAsked map[string]historyAsk
+
+	// registry holds the leader-key commands; leader is the prefix typed after
+	// Space (nil when inactive); overlay is the open modal, if any.
+	registry *commands.Registry
+	leader   []string
+	overlay  overlay
 	// now is the clock; tests replace it.
 	now func() time.Time
 
@@ -183,6 +190,7 @@ func NewModel(wa WAClient, s Store, version string, log *debug.Logger) Model {
 		titleBar:  titlebar.New(),
 		statusBar: statusbar.New(version),
 		chats:     core.NewChats(wa),
+		registry:  commands.Default(),
 
 		historyAsked: make(map[string]historyAsk),
 		now:          time.Now,
