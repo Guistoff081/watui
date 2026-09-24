@@ -18,8 +18,8 @@ func TestHandleNewMessageDeduplicates(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: jid})
 
 	msg := core.Message{ID: "m1", ChatJID: jid, Content: "hi", Timestamp: time.Unix(100, 0)}
-	m, _ = m.handleNewMessage(msg)
-	m, _ = m.handleNewMessage(msg) // duplicate dispatch (e.g. group pkmsg+skmsg)
+	m = send(t, m, core.NewMessage{Message: msg})
+	m = send(t, m, core.NewMessage{Message: msg}) // duplicate dispatch (e.g. group pkmsg+skmsg)
 
 	if got := m.chats.Messages(jid); len(got) != 1 {
 		t.Fatalf("messages = %v, want exactly 1 (deduped)", msgIDs(got))
@@ -33,7 +33,7 @@ func TestHandleNewMessageDeduplicates(t *testing.T) {
 func TestHandleNewMessageCreatesConversation(t *testing.T) {
 	m, s := newTestModel(t)
 
-	m, _ = m.handleNewMessage(core.Message{ID: "m1", ChatJID: "g@g.us", SenderName: "Alice", Content: "hi", Timestamp: time.Unix(100, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "m1", ChatJID: "g@g.us", SenderName: "Alice", Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	stored, _ := s.GetAllConversations(context.Background())
 	if len(stored) != 1 || stored[0].JID != "g@g.us" || !stored[0].IsGroup || stored[0].Name != "Alice" {
@@ -52,7 +52,7 @@ func TestSelectChatMergesStoreAndCache(t *testing.T) {
 	// A live message present only in the in-memory cache.
 	m.chats.AddHistory(jid, []core.Message{{ID: "c1", ChatJID: jid, Timestamp: time.Unix(300, 0)}}, "")
 
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
 	if got, want := msgIDs(m.chats.Messages(jid)), []string{"s1", "s2", "c1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("merged = %v, want %v", got, want)
@@ -74,12 +74,12 @@ func TestMessagesLoadedMergesNotOverwrites(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "123@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 	// A live message already cached.
-	m, _ = m.handleNewMessage(core.Message{ID: "live", ChatJID: jid, Timestamp: time.Unix(500, 0)})
+	m = send(t, m, core.NewMessage{Message: core.Message{ID: "live", ChatJID: jid, Timestamp: time.Unix(500, 0)}})
 
 	parsed, _ := types.ParseJID(jid)
-	m, _ = update(t, m, core.MessagesLoaded{
+	m = send(t, m, core.MessagesLoaded{
 		ChatJID: parsed,
 		Messages: []core.Message{
 			{ID: "hist1", ChatJID: jid, Timestamp: time.Unix(100, 0)},
@@ -103,7 +103,7 @@ func TestMessagesLoadedPreviewUsesPreviewText(t *testing.T) {
 	seedConv(t, &m, core.Conversation{JID: jid})
 
 	parsed, _ := types.ParseJID(jid)
-	m, _ = update(t, m, core.MessagesLoaded{
+	m = send(t, m, core.MessagesLoaded{
 		ChatJID:  parsed,
 		Messages: []core.Message{{ID: "img", ChatJID: jid, MediaType: "image", Timestamp: time.Unix(100, 0)}},
 	})
@@ -122,7 +122,7 @@ func TestConversationUpdatedDoesNotRegressPreview(t *testing.T) {
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid, LastMessage: "live", LastMsgTime: time.Unix(500, 0)})
 
-	m, _ = update(t, m, core.ConversationUpdated{Conversation: core.Conversation{
+	m = send(t, m, core.ConversationUpdated{Conversation: core.Conversation{
 		JID: jid, Name: "A", LastMessage: "hist", LastMsgTime: time.Unix(100, 0),
 	}})
 
@@ -135,12 +135,12 @@ func TestConversationUpdatedDoesNotRegressPreview(t *testing.T) {
 func TestConversationsLoadedAndContactNames(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "a@s.whatsapp.net"
-	m, _ = update(t, m, conversationsLoadedMsg{Conversations: []core.Conversation{{JID: jid, Name: jid}}})
+	m = send(t, m, conversationsLoadedMsg{Conversations: []core.Conversation{{JID: jid, Name: jid}}})
 	if _, ok := m.chats.Conversation(jid); !ok {
 		t.Fatalf("loaded conversation missing from engine")
 	}
 
-	m, _ = update(t, m, contactNamesMsg{Names: map[string]string{jid: "Alice"}})
+	m = send(t, m, contactNamesMsg{Names: map[string]string{jid: "Alice"}})
 
 	if got := conv(m, jid).Name; got != "Alice" {
 		t.Errorf("Name = %q, want Alice", got)
@@ -155,11 +155,11 @@ func TestMessageStatusUpdatesCacheAndStore(t *testing.T) {
 	m, s := newTestModel(t)
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
-	m, _ = m.selectChat(jid)
-	m, _ = update(t, m, input.SendMsg{Text: "hello"})
+	m = open(t, m, jid)
+	m = send(t, m, input.SendMsg{Text: "hello"})
 
 	parsed, _ := types.ParseJID(jid)
-	m, _ = update(t, m, core.MessageStatus{ChatJID: parsed, MessageID: "genid", Status: "read"})
+	m = send(t, m, core.MessageStatus{ChatJID: parsed, MessageID: "genid", Status: "read"})
 
 	if got := m.chats.Messages(jid); len(got) != 1 || got[0].Status != "read" || !got[0].IsFromMe {
 		t.Fatalf("cache = %+v, want own message genid read", got)
@@ -178,9 +178,9 @@ func TestOlderMessagesDedupedAndPrepended(t *testing.T) {
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
 	seedStored(t, &m, []core.Message{{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)}})
-	m, _ = m.selectChat(jid)
+	m = open(t, m, jid)
 
-	m, _ = update(t, m, olderMessagesLoadedMsg{ChatJID: jid, Messages: []core.Message{
+	m = send(t, m, olderMessagesLoadedMsg{ChatJID: jid, Messages: []core.Message{
 		{ID: "a", ChatJID: jid, Timestamp: time.Unix(100, 0)},
 		{ID: "b", ChatJID: jid, Timestamp: time.Unix(200, 0)},
 	}})
@@ -191,7 +191,7 @@ func TestOlderMessagesDedupedAndPrepended(t *testing.T) {
 	if cmd := m.loadOlderMessagesCmd(jid); cmd == nil {
 		t.Fatalf("loadOlderMessagesCmd() = nil, want a store query")
 	}
-	m, _ = update(t, m, olderMessagesLoadedMsg{ChatJID: jid})
+	m = send(t, m, olderMessagesLoadedMsg{ChatJID: jid})
 	if got := len(m.chats.Messages(jid)); got != 2 {
 		t.Errorf("cache len = %d after empty page, want 2", got)
 	}

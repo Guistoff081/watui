@@ -35,8 +35,8 @@ func TestLoadCommandsFeedConversationsAndNames(t *testing.T) {
 		groups:   map[string]string{group: "Team"},
 	}, s, "test", nil)
 
-	m, _ = update(t, m, m.loadConversationsCmd()())
-	m, _ = update(t, m, m.loadContactNamesCmd()())
+	m = send(t, m, m.loadConversationsCmd()())
+	m = send(t, m, m.loadContactNamesCmd()())
 
 	if got := conv(m, dm).Name; got != "Alice" {
 		t.Errorf("dm name = %q, want Alice", got)
@@ -62,8 +62,8 @@ func TestSendFileAndAudioAddOutgoingMessages(t *testing.T) {
 		t.Fatalf("send with no open chat returned a cmd")
 	}
 
-	m, _ = m.selectChat(jid)
-	m, _ = update(t, m, input.SendFileMsg{Path: "/tmp/report.pdf"})
+	m = open(t, m, jid)
+	m = send(t, m, input.SendFileMsg{Path: "/tmp/report.pdf"})
 	if got := conv(m, jid).LastMessage; got != "[file] report.pdf" {
 		t.Errorf("preview = %q, want file label", got)
 	}
@@ -71,7 +71,7 @@ func TestSendFileAndAudioAddOutgoingMessages(t *testing.T) {
 	if len(stored) != 1 || stored[0].LastMessage != "[file] report.pdf" {
 		t.Errorf("stored = %+v, want outgoing preview persisted", stored)
 	}
-	m, _ = update(t, m, input.SendAudioMsg{Path: "/tmp/note.ogg"})
+	m = send(t, m, input.SendAudioMsg{Path: "/tmp/note.ogg"})
 	if got := conv(m, jid).LastMessage; got != "[voice] note.ogg" {
 		t.Errorf("preview = %q, want voice label", got)
 	}
@@ -85,8 +85,8 @@ func TestMessageSendFailedMarksFailed(t *testing.T) {
 	m.statusBar.SetWidth(200)
 	jid := "a@s.whatsapp.net"
 	seedConv(t, &m, core.Conversation{JID: jid})
-	m, _ = m.selectChat(jid)
-	m, _ = update(t, m, input.SendMsg{Text: "hi"})
+	m = open(t, m, jid)
+	m = send(t, m, input.SendMsg{Text: "hi"})
 
 	parsed, _ := types.ParseJID(jid)
 	m, cmd := update(t, m, core.MessageSendFailed{ChatJID: parsed, MessageID: "genid", Err: errors.New("nope")})
@@ -98,7 +98,7 @@ func TestMessageSendFailedMarksFailed(t *testing.T) {
 		t.Errorf("status bar = %q, want failure message and clear timer", m.statusBar.View())
 	}
 
-	m, _ = update(t, m, core.MessageSent{ChatJID: parsed, MessageID: "genid"})
+	m = send(t, m, core.MessageSent{ChatJID: parsed, MessageID: "genid"})
 	if got := m.chats.Messages(jid); got[0].Status != "sent" {
 		t.Errorf("status = %q, want sent", got[0].Status)
 	}
@@ -106,8 +106,8 @@ func TestMessageSendFailedMarksFailed(t *testing.T) {
 
 func TestConnectedLayoutAndView(t *testing.T) {
 	m, _ := newTestModel(t)
-	m, _ = update(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m, _ = update(t, m, core.Connected{})
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, core.Connected{})
 	if m.state != StateChat {
 		t.Fatalf("state = %v, want StateChat", m.state)
 	}
@@ -115,7 +115,7 @@ func TestConnectedLayoutAndView(t *testing.T) {
 		t.Errorf("chat View() is empty")
 	}
 
-	m, _ = update(t, m, core.LoginFailed{Err: errors.New("bad qr")})
+	m = send(t, m, core.LoginFailed{Err: errors.New("bad qr")})
 	if m.state != StateError || !strings.Contains(m.View(), "bad qr") {
 		t.Errorf("error view = %q, want login error", m.View())
 	}
@@ -123,20 +123,20 @@ func TestConnectedLayoutAndView(t *testing.T) {
 
 func TestTabCyclesFocus(t *testing.T) {
 	m, _ := newTestModel(t)
-	m, _ = update(t, m, core.Connected{})
+	m = send(t, m, core.Connected{})
 
 	want := []Panel{PanelMessages, PanelInput, PanelChatList}
 	for _, p := range want {
-		m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		m = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
 		if m.focus != p {
 			t.Fatalf("focus = %v, want %v", m.focus, p)
 		}
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.focus != PanelInput {
 		t.Errorf("shift+tab focus = %v, want PanelInput", m.focus)
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.focus != PanelChatList {
 		t.Errorf("esc focus = %v, want PanelChatList", m.focus)
 	}
@@ -154,7 +154,7 @@ func TestIsTypingKey(t *testing.T) {
 
 func TestDisconnectedInChatSchedulesReconnect(t *testing.T) {
 	m, _ := newTestModel(t)
-	m, _ = update(t, m, core.Connected{})
+	m = send(t, m, core.Connected{})
 	m, cmd := update(t, m, core.Disconnected{})
 	if m.state != StateChat || m.reconnectAttempts != 1 || cmd == nil {
 		t.Fatalf("state=%v attempts=%d cmd=%v, want reconnect scheduled", m.state, m.reconnectAttempts, cmd != nil)

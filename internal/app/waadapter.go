@@ -57,9 +57,9 @@ func newWAAdapter(c syncWAClient) *waAdapter {
 }
 
 // Connect returns a command that connects (running the QR flow if needed).
-// It yields nil on success, the bare error when the socket could not be opened
-// before QR pairing (the app shows it as a fatal error), and core.LoginFailed
-// for any other failure.
+// It yields nil on success, connectFailedMsg when the socket could not be
+// opened before QR pairing (the app shows it as a fatal error), and
+// core.LoginFailed for any other failure.
 func (a *waAdapter) Connect() tea.Cmd {
 	return func() tea.Msg {
 		err := a.c.Connect(context.Background())
@@ -68,7 +68,7 @@ func (a *waAdapter) Connect() tea.Cmd {
 		}
 		var ce *whatsapp.ConnectError
 		if errors.As(err, &ce) {
-			return err
+			return connectFailedMsg{Err: err}
 		}
 		return core.LoginFailed{Err: err}
 	}
