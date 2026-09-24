@@ -338,9 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.handleMediaDownloaded(msg))
 
 	case theme.MediaDownloadFailedMsg:
-		if m.log != nil && msg.Err != nil {
-			m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
-		}
+		cmds = append(cmds, m.handleMediaDownloadFailed(msg))
 
 	case chatview.MediaOpenMsg:
 		cmds = append(cmds, m.handleMediaOpen(msg.ChatJID, msg.MessageID))
@@ -544,15 +542,9 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 
 	// Auto-download sticker files for the visible window (stickers have no embedded
 	// thumbnail, so they need the full file before a half-block preview can render).
-	const stickerAutoDownloadCap = 10
 	var stickerCmds []tea.Cmd
-	for _, msg := range messages {
-		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
-			stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
-			if len(stickerCmds) >= stickerAutoDownloadCap {
-				break
-			}
-		}
+	for _, msg := range stickersToAutoDownload(messages, stickerAutoDownloadCap) {
+		stickerCmds = append(stickerCmds, m.wa.DownloadMedia(msg))
 	}
 
 	focusCmd := m.setFocus(PanelMessages)
@@ -720,6 +712,42 @@ func (m *Model) handleMediaDownloaded(msg theme.MediaDownloadedMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// handleMediaDownloadFailed logs a failed download. If it was the one the user
+// is waiting to open, the pending open is dropped and the error is surfaced in
+// the status bar; background (sticker auto-download) failures are only logged.
+func (m *Model) handleMediaDownloadFailed(msg theme.MediaDownloadFailedMsg) tea.Cmd {
+	if m.log != nil && msg.Err != nil {
+		m.log.Error(msg.Err, "media download failed", "msg", msg.MessageID)
+	}
+	if msg.MessageID == "" || m.pendingOpenMsgID != msg.MessageID {
+		return nil
+	}
+	m.pendingOpenMsgID = ""
+	errText := "Media download failed"
+	if msg.Err != nil {
+		errText += ": " + msg.Err.Error()
+	}
+	m.statusBar.SetMessage(errText)
+	return clearStatusAfterDelay(4 * time.Second)
+}
+
+// stickerAutoDownloadCap bounds how many sticker downloads selectChat starts.
+const stickerAutoDownloadCap = 10
+
+// stickersToAutoDownload returns up to limit stickers that still need their file
+// downloaded, newest first. msgs is time-ascending, so walking backwards favours
+// the stickers visible at the bottom of the chat.
+func stickersToAutoDownload(msgs []theme.Message, limit int) []theme.Message {
+	var out []theme.Message
+	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
+		msg := msgs[i]
+		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
+			out = append(out, msg)
+		}
+	}
+	return out
 }
 
 // handleMediaOpen opens or downloads-then-opens the media for the selected message.
