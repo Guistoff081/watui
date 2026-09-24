@@ -42,6 +42,7 @@ type histMsg struct {
 	fromMe      bool
 	participant string
 	pushName    string
+	bizName     string
 	ts          uint64
 	msg         *waProto.Message
 }
@@ -62,6 +63,7 @@ func historyConv(id string, msgs ...histMsg) *waHistorySync.Conversation {
 				MessageTimestamp: proto.Uint64(m.ts),
 				Message:          m.msg,
 				PushName:         pushNamePtr(m.pushName),
+				VerifiedBizName:  pushNamePtr(m.bizName),
 			},
 		})
 	}
@@ -348,5 +350,16 @@ func TestConvertHistoryConversationReportsUnsupported(t *testing.T) {
 	convertHistoryConversation(conv, r)
 	if len(r.unknown) != 1 || r.unknown[0] != "u" {
 		t.Errorf("unsupported = %v, want [u]", r.unknown)
+	}
+}
+
+func TestConvertHistoryConversationPrefersVerifiedBusinessName(t *testing.T) {
+	conv := historyConv("551151948658@s.whatsapp.net",
+		histMsg{id: "a", ts: 1, pushName: "jeitto_bot", bizName: "Jeitto",
+			msg: &waProto.Message{Conversation: proto.String("Olá")}},
+	)
+	got, msgs, _ := convertHistoryConversation(conv, &fakeHistoryResolver{})
+	if got.Name != "Jeitto" || msgs[0].SenderName != "Jeitto" {
+		t.Errorf("name = %q, sender = %q; want verified business name Jeitto", got.Name, msgs[0].SenderName)
 	}
 }

@@ -198,13 +198,13 @@ func TestOlderMessagesDedupedAndPrepended(t *testing.T) {
 	}
 }
 
-func TestPushNameChangedNamesUnknownChat(t *testing.T) {
+func TestContactNameChangedNamesUnknownChat(t *testing.T) {
 	m, _ := newTestModel(t)
 	jid := "5511999999999@s.whatsapp.net"
 	m.chats.Load([]core.Conversation{{JID: jid}, {JID: "k@s.whatsapp.net", Name: "Agenda"}})
 
-	m = send(t, m, core.PushNameChanged{JID: jid, Name: "Loja"})
-	m = send(t, m, core.PushNameChanged{JID: "k@s.whatsapp.net", Name: "Outro"})
+	m = send(t, m, core.ContactNameChanged{JID: jid, Name: "Loja"})
+	m = send(t, m, core.ContactNameChanged{JID: "k@s.whatsapp.net", Name: "Outro"})
 
 	if conv, _ := m.chats.Conversation(jid); conv.Name != "Loja" {
 		t.Errorf("unknown chat name = %q, want Loja", conv.Name)

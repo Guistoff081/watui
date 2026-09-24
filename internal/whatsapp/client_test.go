@@ -577,10 +577,14 @@ func TestHandleEventPushName(t *testing.T) {
 
 	c.handleEvent(&events.PushName{JID: testPN, NewPushName: "Loja"})
 	c.handleEvent(&events.PushName{JID: testPN}) // cleared name: nothing to apply
+	c.handleEvent(&events.BusinessName{JID: testPN, NewBusinessName: "Jeitto"})
 
 	got := rec.take()
-	want := core.PushNameChanged{JID: testPN.String(), Name: "Loja"}
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("events = %#v, want [%#v]", got, want)
+	want := []core.Event{
+		core.ContactNameChanged{JID: testPN.String(), Name: "Loja"},
+		core.ContactNameChanged{JID: testPN.String(), Name: "Jeitto"},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }

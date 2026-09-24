@@ -74,11 +74,19 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 	case *events.HistorySync:
 		c.handleHistorySync(evt)
 
+	case *events.BusinessName:
+		if evt.NewBusinessName != "" {
+			c.send(core.ContactNameChanged{
+				JID:  c.canonicalChatJID(evt.JID, types.EmptyJID).String(),
+				Name: evt.NewBusinessName,
+			})
+		}
+
 	case *events.PushName:
 		// whatsmeow already stored it; tell the app so an unnamed chat (a
 		// number outside the address book) picks it up without a restart.
 		if evt.NewPushName != "" {
-			c.send(core.PushNameChanged{
+			c.send(core.ContactNameChanged{
 				JID:  c.canonicalChatJID(evt.JID, evt.JIDAlt).String(),
 				Name: evt.NewPushName,
 			})
@@ -103,6 +111,9 @@ func (c *Client) handleMessage(evt *events.Message) {
 	msg.ChatJID = chatJID.String()
 	msg.SenderJID = senderJID.String()
 	msg.SenderName = evt.Info.PushName
+	if vn := evt.Info.VerifiedName; vn != nil && vn.Details.GetVerifiedName() != "" {
+		msg.SenderName = vn.Details.GetVerifiedName() // businesses show their verified name
+	}
 	msg.Timestamp = evt.Info.Timestamp
 	msg.IsFromMe = evt.Info.IsFromMe
 	msg.Status = "received"
@@ -268,7 +279,8 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 		if msg.IsFromMe {
 			msg.Status = "read"
 		} else {
-			msg.SenderName = wmi.GetPushName()
+			// Businesses show their verified name, like WhatsApp does.
+			msg.SenderName = firstNonEmpty(wmi.GetVerifiedBizName(), wmi.GetPushName())
 		}
 		if msg.Content == unsupportedPlaceholder {
 			r.unsupported(msg.ID, content)
@@ -601,13 +613,18 @@ func extractStructuredText(msg *waProto.Message) string {
 	switch {
 	case msg.TemplateMessage != nil:
 		t := msg.TemplateMessage
-		return firstNonEmpty(
-			t.GetHydratedTemplate().GetHydratedContentText(),
-			t.GetHydratedTemplate().GetHydratedTitleText(),
-			t.GetInteractiveMessageTemplate().GetBody().GetText(),
-		)
+		if i := t.GetInteractiveMessageTemplate(); i != nil {
+			return interactiveText(i)
+		}
+		h := t.GetHydratedTemplate()
+		if h == nil {
+			h = t.GetHydratedFourRowTemplate()
+		}
+		tag := headerTag(h.GetImageMessage() != nil, h.GetVideoMessage() != nil,
+			h.GetDocumentMessage() != nil, h.GetLocationMessage() != nil)
+		return tagged(tag, firstNonEmpty(h.GetHydratedContentText(), h.GetHydratedTitleText()))
 	case msg.InteractiveMessage != nil:
-		return firstNonEmpty(msg.InteractiveMessage.GetBody().GetText(), msg.InteractiveMessage.GetHeader().GetTitle())
+		return interactiveText(msg.InteractiveMessage)
 	case msg.ButtonsMessage != nil:
 		return firstNonEmpty(msg.ButtonsMessage.GetContentText(), msg.ButtonsMessage.GetText())
 	case msg.ListMessage != nil:
@@ -659,9 +676,37 @@ func extractStructuredText(msg *waProto.Message) string {
 	return ""
 }
 
+// interactiveText renders an interactive message: its body (or header title),
+// prefixed with the header media kind when there is one.
+func interactiveText(i *waProto.InteractiveMessage) string {
+	h := i.GetHeader()
+	tag := headerTag(h.GetImageMessage() != nil, h.GetVideoMessage() != nil,
+		h.GetDocumentMessage() != nil, h.GetLocationMessage() != nil)
+	return tagged(tag, firstNonEmpty(i.GetBody().GetText(), h.GetTitle()))
+}
+
+// headerTag names the media shown above a template/interactive message, as
+// WhatsApp's list preview does with its camera/video icons.
+func headerTag(image, video, document, location bool) string {
+	switch {
+	case image:
+		return "[image]"
+	case video:
+		return "[video]"
+	case document:
+		return "[file]"
+	case location:
+		return "[location]"
+	}
+	return ""
+}
+
 // tagged joins a kind tag and an optional detail ("[poll] Lunch?" / "[poll]").
 func tagged(tag, detail string) string {
-	if detail == "" {
+	switch {
+	case tag == "":
+		return detail
+	case detail == "":
 		return tag
 	}
 	return tag + " " + detail

@@ -83,5 +83,17 @@ func DisplayName(conv Conversation) string {
 	if user == "0" {
 		return "WhatsApp" // official service account
 	}
-	return "+" + user
+	return formatPhone(user)
+}
+
+// formatPhone renders an international number the way WhatsApp does for
+// Brazil (+55 AA NNNNN-NNNN / +55 AA NNNN-NNNN); other countries get the
+// plain digits, since their grouping rules vary.
+func formatPhone(digits string) string {
+	if strings.HasPrefix(digits, "55") && (len(digits) == 12 || len(digits) == 13) {
+		area, local := digits[2:4], digits[4:]
+		split := len(local) - 4
+		return "+55 " + area + " " + local[:split] + "-" + local[split:]
+	}
+	return "+" + digits
 }

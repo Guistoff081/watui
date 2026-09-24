@@ -116,7 +116,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contactNamesMsg:
 		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(msg.Names)))
 
-	case core.PushNameChanged:
+	case core.ContactNameChanged:
 		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(map[string]string{msg.JID: msg.Name})))
 
 	case core.ConversationUpdated:

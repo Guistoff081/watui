@@ -97,9 +97,9 @@ type MediaDownloadFailed struct {
 	Err       error
 }
 
-// PushNameChanged is emitted when a user's self-chosen display name changes.
-// It only names chats that have no better name (address book, business).
-type PushNameChanged struct {
+// ContactNameChanged is emitted when a user's push name or verified business
+// name changes. It only names chats that have no better name (address book).
+type ContactNameChanged struct {
 	JID  string // canonical chat JID
 	Name string
 }
@@ -122,4 +122,4 @@ func (Typing) isEvent()              {}
 func (HistorySyncComplete) isEvent() {}
 func (MediaDownloaded) isEvent()     {}
 func (MediaDownloadFailed) isEvent() {}
-func (PushNameChanged) isEvent() {}
+func (ContactNameChanged) isEvent()  {}

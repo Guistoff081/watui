@@ -415,3 +415,34 @@ func TestExtractTextContentStructuredKinds(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTextContentTemplateHeaderMedia(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{"template with image header", &waProto.Message{TemplateMessage: &waProto.TemplateMessage{
+			HydratedTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{
+				HydratedContentText: proto.String("Olá, Elisson."),
+				Title:               &waProto.TemplateMessage_HydratedFourRowTemplate_ImageMessage{ImageMessage: &waProto.ImageMessage{}},
+			},
+		}}, "[image] Olá, Elisson."},
+		{"four-row format", &waProto.Message{TemplateMessage: &waProto.TemplateMessage{
+			Format: &waProto.TemplateMessage_HydratedFourRowTemplate_{HydratedFourRowTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{
+				HydratedContentText: proto.String("Seu limite"),
+			}},
+		}}, "Seu limite"},
+		{"interactive with video header", &waProto.Message{InteractiveMessage: &waProto.InteractiveMessage{
+			Header: &waProto.InteractiveMessage_Header{Media: &waProto.InteractiveMessage_Header_VideoMessage{VideoMessage: &waProto.VideoMessage{}}},
+			Body:   &waProto.InteractiveMessage_Body{Text: proto.String("Assista")},
+		}}, "[video] Assista"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractTextContent(tt.msg); got != tt.want {
+				t.Errorf("extractTextContent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
