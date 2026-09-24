@@ -137,3 +137,15 @@ func TestMediaDownloadedOpensPending(t *testing.T) {
 		t.Errorf("handleMediaOpen(unknown) cmd != nil, want nil")
 	}
 }
+
+func TestMediaOpenFailedShowsStatus(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.statusBar.SetWidth(200)
+	m = send(t, m, mediaOpenFailedMsg{Err: errors.New("xdg-open: exit status 3")})
+	if v := m.statusBar.View(); !strings.Contains(v, "Could not open media") {
+		t.Errorf("status bar = %q, want open failure", v)
+	}
+	if m.state == StateError {
+		t.Errorf("open failure must not enter StateError")
+	}
+}

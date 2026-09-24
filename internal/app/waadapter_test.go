@@ -204,14 +204,18 @@ func TestAdapterDownloadMedia(t *testing.T) {
 }
 
 func TestAdapterOpenMedia(t *testing.T) {
-	for _, openErr := range []error{nil, errors.New("no xdg-open")} {
-		f := &fakeSyncWA{openErr: openErr}
-		if got := newWAAdapter(f).OpenMedia("/cache/a.ogg", "voice")(); got != nil {
-			t.Errorf("OpenMedia(err=%v) msg = %#v, want nil", openErr, got)
-		}
-		if f.openPath != "/cache/a.ogg" || f.openType != "voice" {
-			t.Errorf("OpenMedia called with (%q, %q)", f.openPath, f.openType)
-		}
+	f := &fakeSyncWA{}
+	if got := newWAAdapter(f).OpenMedia("/cache/a.ogg", "voice")(); got != nil {
+		t.Errorf("OpenMedia success msg = %#v, want nil", got)
+	}
+	if f.openPath != "/cache/a.ogg" || f.openType != "voice" {
+		t.Errorf("OpenMedia called with (%q, %q)", f.openPath, f.openType)
+	}
+
+	fail := errors.New("no viewer for image/webp")
+	got := newWAAdapter(&fakeSyncWA{openErr: fail}).OpenMedia("/cache/a.webp", "sticker")()
+	if msg, ok := got.(mediaOpenFailedMsg); !ok || !errors.Is(msg.Err, fail) {
+		t.Errorf("OpenMedia failure msg = %#v, want mediaOpenFailedMsg wrapping the error", got)
 	}
 }
 

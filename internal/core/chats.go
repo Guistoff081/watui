@@ -189,11 +189,12 @@ func (c *Chats) AddMessage(msg Message, viewing string) Effects {
 
 	conv, ok := c.convs[jid]
 	if !ok {
-		name := msg.SenderName
-		if name == "" {
-			name = jid
-		}
-		conv = Conversation{JID: jid, Name: name, IsGroup: strings.HasSuffix(jid, "@g.us")}
+		conv = Conversation{JID: jid, Name: jid, IsGroup: strings.HasSuffix(jid, "@g.us")}
+	}
+	// A 1:1 chat with no known name takes the sender's push name (numbers
+	// outside the address book). Groups never do: that is a member's name.
+	if !conv.IsGroup && !msg.IsFromMe && msg.SenderName != "" && (conv.Name == "" || conv.Name == conv.JID) {
+		conv.Name = msg.SenderName
 	}
 	if msg.Timestamp.After(conv.LastMsgTime) {
 		conv.LastMessage = msg.PreviewText()

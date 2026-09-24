@@ -2,12 +2,9 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.mau.fi/whatsmeow/types"
@@ -50,11 +47,41 @@ type openMediaCall struct {
 type recordingWA struct {
 	fakeWA
 
-	mu        sync.Mutex
-	alts      map[string]string
-	markReads []markReadCall
-	downloads []core.Message
-	opens     []openMediaCall
+	mu           sync.Mutex
+	alts         map[string]string
+	markReads    []markReadCall
+	downloads    []core.Message
+	opens        []openMediaCall
+	connects     int
+	disconnected bool
+	presence     []bool   // SendChatPresence composing values, in order
+	texts        []string // SendTextMessage bodies
+}
+
+func (r *recordingWA) Connect() tea.Cmd {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.connects++
+	return nil
+}
+
+func (r *recordingWA) Disconnect() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.disconnected = true
+}
+
+func (r *recordingWA) SendChatPresence(_ types.JID, composing bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.presence = append(r.presence, composing)
+}
+
+func (r *recordingWA) SendTextMessage(_ types.JID, _ string, text string) tea.Cmd {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.texts = append(r.texts, text)
+	return nil
 }
 
 func (r *recordingWA) AltChatJID(jid string) string {
@@ -114,148 +141,6 @@ func newTestModel(t *testing.T) (Model, *store.Store) {
 	t.Helper()
 	s := newTestStore(t)
 	return testModel(fakeWA{}, s), s
-}
-
-// testModel builds a Model whose timers yield delayedMsg immediately instead
-// of sleeping, so run() can settle a model without waiting on them.
-func testModel(wa WAClient, s Store) Model {
-	m := NewModel(wa, s, "test", nil)
-	m.delay = func(d time.Duration, msg tea.Msg) tea.Cmd {
-		return func() tea.Msg { return delayedMsg{d: d, msg: msg} }
-	}
-	return m
-}
-
-// delayedMsg stands in for a timer's message in tests; run() never delivers it.
-type delayedMsg struct {
-	d   time.Duration
-	msg tea.Msg
-}
-
-// collect executes cmd (expanding batches) and returns the messages it
-// yields, without feeding them back to a model.
-func collect(t *testing.T, cmd tea.Cmd) []tea.Msg {
-	t.Helper()
-	var out []tea.Msg
-	queue := []tea.Cmd{cmd}
-	for len(queue) > 0 {
-		c := queue[0]
-		queue = queue[1:]
-		if c == nil {
-			continue
-		}
-		switch msg := c().(type) {
-		case nil:
-		case tea.BatchMsg:
-			queue = append(queue, msg...)
-		default:
-			out = append(out, msg)
-		}
-	}
-	return out
-}
-
-// run executes cmd and every command it leads to, feeding each message back
-// through Update, and returns the settled model. Timers (delayedMsg) are not
-// delivered.
-func run(t *testing.T, m Model, cmd tea.Cmd) Model {
-	t.Helper()
-	pending := []tea.Cmd{cmd}
-	for i := 0; len(pending) > 0; i++ {
-		if i > 1000 {
-			t.Fatal("run: commands did not settle")
-		}
-		var next []tea.Cmd
-		for _, msg := range collect(t, tea.Batch(pending...)) {
-			if _, ok := msg.(delayedMsg); ok {
-				continue
-			}
-			var c tea.Cmd
-			m, c = update(t, m, msg)
-			next = append(next, c)
-		}
-		pending = next
-	}
-	return m
-}
-
-// send runs msg through Update and settles the commands it returns.
-func send(t *testing.T, m Model, msg tea.Msg) Model {
-	t.Helper()
-	m, cmd := update(t, m, msg)
-	return run(t, m, cmd)
-}
-
-// open selects jid and settles the resulting load.
-func open(t *testing.T, m Model, jid string) Model {
-	t.Helper()
-	m, cmd := m.selectChat(jid)
-	return run(t, m, cmd)
-}
-
-// fakeStore is an in-memory Store that records calls in order and can be told
-// to fail specific operations.
-type fakeStore struct {
-	mu    sync.Mutex
-	calls []string
-	errs  map[string]error // keyed by operation name, e.g. "InsertMessages"
-
-	convs    []core.Conversation
-	messages []core.Message
-}
-
-func (f *fakeStore) record(op, arg string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, op+" "+arg)
-	return f.errs[op]
-}
-
-func (f *fakeStore) Calls() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.calls...)
-}
-
-func (f *fakeStore) GetAllConversations(context.Context) ([]core.Conversation, error) {
-	if err := f.record("GetAllConversations", ""); err != nil {
-		return nil, err
-	}
-	return f.convs, nil
-}
-
-func (f *fakeStore) UpsertConversation(_ context.Context, c core.Conversation) error {
-	return f.record("UpsertConversation", c.JID)
-}
-
-func (f *fakeStore) ClearUnread(_ context.Context, jid string) error {
-	return f.record("ClearUnread", jid)
-}
-
-func (f *fakeStore) InsertMessages(_ context.Context, msgs []core.Message) error {
-	return f.record("InsertMessages", strings.Join(msgIDs(msgs), ","))
-}
-
-func (f *fakeStore) GetMessagesForChats(_ context.Context, jids []string, limit int) ([]core.Message, error) {
-	if err := f.record("GetMessagesForChats", strings.Join(jids, ",")); err != nil {
-		return nil, err
-	}
-	return f.messages, nil
-}
-
-func (f *fakeStore) GetMessagesBefore(_ context.Context, jid string, before time.Time, limit int) ([]core.Message, error) {
-	if err := f.record("GetMessagesBefore", jid); err != nil {
-		return nil, err
-	}
-	return nil, nil
-}
-
-func (f *fakeStore) UpdateMessageStatus(_ context.Context, id, status string) error {
-	return f.record("UpdateMessageStatus", fmt.Sprintf("%s=%s", id, status))
-}
-
-func (f *fakeStore) UpdateMessageMediaPath(_ context.Context, jid, id, path string) error {
-	return f.record("UpdateMessageMediaPath", id)
 }
 
 // newFakeStoreModel returns a model backed by a fakeStore and a recordingWA.

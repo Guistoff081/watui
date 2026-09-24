@@ -1,8 +1,11 @@
 package chatview
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/watui/watui/internal/core"
 )
@@ -213,5 +216,22 @@ func TestSetChatDoesNotAliasCallerSlice(t *testing.T) {
 	}
 	if got := msgIDs(m.messages); len(got) != 3 || got[1] != "b" {
 		t.Errorf("view messages = %v, want [a b c]", got)
+	}
+}
+
+// Long lines must wrap inside the bubble, not be cut at the bubble edge.
+func TestRenderMessageWrapsLongLines(t *testing.T) {
+	text := "Se você estava avaliando iniciar uma pós-graduação e dar o próximo passo na carreira, as inscrições seguem abertas até sexta"
+	msg := core.Message{ID: "w", Content: text, Timestamp: time.Unix(0, 0)}
+	out := stripANSI(renderMessage(msg, 60, false, false, map[string]string{}))
+	for _, word := range []string{"avaliando", "carreira", "sexta"} {
+		if !strings.Contains(out, word) {
+			t.Errorf("rendered bubble lost %q (truncated instead of wrapped):\n%s", word, out)
+		}
+	}
+	for _, l := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(l); w > 60 {
+			t.Errorf("line width %d exceeds view width 60: %q", w, l)
+		}
 	}
 }

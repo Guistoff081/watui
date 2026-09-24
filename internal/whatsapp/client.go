@@ -439,28 +439,48 @@ func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, e
 	return cachePath, nil
 }
 
-// OpenMedia opens path in an appropriate external application without waiting
-// for it to exit. Audio/voice messages are sent to the first available player;
-// everything else goes to xdg-open. The returned error only reports a failure to
-// start the program.
+// OpenMedia opens path in an appropriate external application. Audio/voice
+// messages go to the first available player, which is started and not waited
+// for; everything else goes to xdg-open, which is run to completion (it returns
+// as soon as the viewer launches) so a missing handler is reported.
 func (c *Client) OpenMedia(path, mediaType string) error {
-	return mediaOpenCommand(path, mediaType, exec.LookPath).Start()
+	cmd, err := mediaOpenCommand(path, mediaType, exec.LookPath)
+	if err != nil {
+		return err
+	}
+	if filepath.Base(cmd.Path) == "xdg-open" {
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("xdg-open: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }() // reap the player when it exits
+	return nil
 }
 
 // mediaOpenCommand builds the command OpenMedia runs. lookPath is injected so
 // player selection can be tested without the players installed.
-func mediaOpenCommand(path, mediaType string, lookPath func(string) (string, error)) *exec.Cmd {
+//
+// The path is made absolute, so it always starts with "/" and can never be
+// mistaken for a flag. That replaces a "--" separator, which xdg-open rejects
+// as an unknown option (it then opened nothing).
+func mediaOpenCommand(path, mediaType string, lookPath func(string) (string, error)) (*exec.Cmd, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve media path: %w", err)
+	}
 	switch mediaType {
 	case "audio", "voice":
 		for _, player := range []string{"mpv", "ffplay", "aplay"} {
 			if _, err := lookPath(player); err == nil {
-				// "--" terminates option parsing so a path starting with "-"
-				// is never mistaken for a flag.
-				return exec.Command(player, "--", path)
+				return exec.Command(player, abs), nil
 			}
 		}
 	}
-	return exec.Command("xdg-open", "--", path)
+	return exec.Command("xdg-open", abs), nil
 }
 
 // waMediaType maps a theme media-type string to the whatsmeow MediaType constant.

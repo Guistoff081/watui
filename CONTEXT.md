@@ -34,19 +34,32 @@ Stack: Go + Bubble Tea (Charm) + whatsmeow.
 watui/
 ├── cmd/watui/main.go              # Entry point, wiring
 ├── internal/
-│   ├── app/
-│   │   ├── app.go                 # Root Bubble Tea model (orchestrator)
-│   │   └── *_test.go              # merge/sort, alias JID, update handlers
-│   ├── core/                      # Domínio sem UI: modelos + eventos
+│   ├── app/                       # Root Bubble Tea model (orchestrator)
+│   │   ├── model.go               # Model, NewModel, interfaces WAClient + Store, msgs privadas
+│   │   ├── update.go              # Switch do Update()
+│   │   ├── keys.go                # Teclas, foco, presença "digitando"
+│   │   ├── chats.go               # Seleção/abertura de chat, Effects → UI + cmds, recibos
+│   │   ├── persist.go             # writeQueue: escritas SQLite ordenadas fora do Update
+│   │   ├── media.go / send.go     # Download/abrir mídia; envio texto/arquivo/áudio
+│   │   ├── commands.go            # Cmds de carga (store, nomes), timers
+│   │   ├── view.go                # Layout + View
+│   │   ├── waadapter.go           # WAClient (tea.Cmd) sobre whatsapp.Client síncrono
+│   │   └── *_test.go              # fakes (WA, store), driver de cmds, fluxos, unread, mídia
+│   ├── core/                      # Domínio sem UI: modelos + eventos + regras
 │   │   ├── models.go              # Conversation, Message, PreviewText()
-│   │   └── events.go              # core.Event (NewMessage, Connected, MessageSent…)
+│   │   ├── events.go              # core.Event (NewMessage, Connected, MessageSent…)
+│   │   ├── chats.go               # core.Chats: estado de conversas puro → core.Effects
+│   │   └── chats_test.go
 │   ├── theme/                     # Estilos e keymaps da UI
 │   │   ├── styles.go              # Lipgloss styles compartilhados
 │   │   └── keymap.go              # Keybindings compartilhados
 │   ├── whatsapp/
-│   │   ├── client.go              # whatsmeow wrapper: connect, send, media download/open
+│   │   ├── client.go              # whatsmeow wrapper síncrono (ctx): connect, send, media
 │   │   ├── jid.go                 # Canonicalização LID ↔ PN
-│   │   └── events.go              # whatsmeow events → core events
+│   │   ├── events.go              # whatsmeow events → core events
+│   │   ├── client_test.go         # Client contra store whatsmeow offline
+│   │   ├── events_test.go / extract_test.go
+│   │   └── history_test.go        # Conversão de history sync com resolver fake
 │   ├── ui/
 │   │   ├── auth/
 │   │   │   ├── qr.go              # QR code auth screen (half-block + sextant rendering)
@@ -67,7 +80,8 @@ watui/
 │   │   └── titlebar/titlebar.go   # Nome do chat ativo, typing indicator
 │   ├── store/
 │   │   ├── store.go               # App-level SQLite (conversations + messages + media)
-│   │   └── migrations.go          # Schema + migrações idempotentes
+│   │   ├── migrations.go          # Schema + migrações idempotentes
+│   │   └── store_test.go / alias_test.go
 │   ├── config/
 │   │   ├── config.go              # TOML config loading
 │   │   └── config_test.go
@@ -93,10 +107,10 @@ comandos: app.Update() → WAClient (app/waadapter.go, tea.Cmd) → whatsapp.Cli
 ```
 
 - **Eventos**: `whatsapp.Client.SetEventHandler(func(core.Event))` recebe, em `main.go`, `func(e core.Event) { p.Send(e) }`. Cada evento whatsmeow é traduzido para um evento de domínio em `core/` (struct simples, recebida pelo app como `tea.Msg`).
-- **Comandos**: os métodos do client são síncronos e recebem `context.Context` (`Connect(ctx) error`, `SendText/SendFile/SendAudio(ctx, …) (core.MessageSent, error)`, `DownloadMedia(ctx, msg) (path, error)`, `OpenMedia`, `MarkRead`, `SendChatPresence`, …). O adapter `app.NewWAClient` embrulha cada chamada em `tea.Cmd` e mapeia resultado/erro para eventos (`MessageSendFailed`, `MediaDownloaded`/`MediaDownloadFailed`, `LoginFailed`; `*whatsapp.ConnectError` vira `error` puro). O fluxo QR bloqueia dentro de `Connect` emitindo `core.QRCode`/`core.QRTimeout` pelo handler.
+- **Comandos**: os métodos do client são síncronos e recebem `context.Context` (`Connect(ctx) error`, `SendText/SendFile/SendAudio(ctx, …) (core.MessageSent, error)`, `DownloadMedia(ctx, msg) (path, error)`, `OpenMedia`, `MarkRead`, `SendChatPresence`, …). O adapter `app.NewWAClient` embrulha cada chamada em `tea.Cmd` e mapeia resultado/erro para eventos (`MessageSendFailed`, `MediaDownloaded`/`MediaDownloadFailed`, `LoginFailed`; `*whatsapp.ConnectError` vira a msg privada `connectFailedMsg`, único erro que leva a `StateError`). O fluxo QR bloqueia dentro de `Connect` emitindo `core.QRCode`/`core.QRTimeout` pelo handler.
 - O history sync passa por `convertHistoryConversation` (pura, com um resolver para JID canônico/nomes), que desembrulha `EphemeralMessage`, `ViewOnceMessage*`, `DocumentWithCaptionMessage` etc. antes de extrair o conteúdo.
 - O `internal/core/` não importa nada do restante do projeto (evita import cycles).
-- O root `app.Model` roteia mensagens para os child models.
+- O root `app.Model` roteia mensagens para os child models. O estado de conversas fica em `core.Chats`, que devolve `core.Effects`; o app atualiza UI na hora e devolve `tea.Cmd`s para SQLite (via `writeQueue`, em ordem: conversas → mensagens → não lidas) e `MarkRead`. Nenhum I/O roda dentro do `Update()`; erros de persistência voltam como `persistErrMsg` (log + status bar).
 
 #### Sequência de startup
 
@@ -290,15 +304,14 @@ Pendente (movido para Fase 13):
 
 Backlog conhecido (não incluído na 7.5):
 - Possível reconexão dupla: app agenda `Connect()` enquanto whatsmeow já reconecta sozinho; após 5 tentativas o app para em silêncio
-- Lazy-load de mensagens antigas não deduplica nem consulta aliases LID↔PN
-- History sync de grupos sem `SenderName` e com `SenderJID` não canonicalizado
-- Qualquer `error` como `tea.Msg` derruba o app para `StateError`
+- Lazy-load de mensagens antigas não consulta aliases LID↔PN
+- History sync de grupos sem `SenderName`
 - Typing indicator exibe telefone em vez do nome e não resolve alias
 - `go install github.com/watui/watui/...` não funciona: module path ≠ repositório (`Guistoff081/watui`)
 
 ---
 
-### 🔜 Fase 8: Core desacoplado (refactor para testabilidade)
+### ✅ Fase 8: Core desacoplado (refactor para testabilidade)
 
 **Objetivo:** separar domínio e sessão WhatsApp do Bubble Tea — pré-requisito para daemon, plugin Omarchy e multi-conta.
 
@@ -313,8 +326,8 @@ Backlog conhecido (não incluído na 7.5):
 PRs empilhados (`phase-8/*`):
 1. `01-core-package` — modelos + eventos de `theme` → `internal/core` (sufixo `Msg` removido, interface selada `core.Event`); CI roda em PRs empilhados e checa gofmt
 2. `02-whatsapp-sync` ∥ `03-core-chats` (paralelos) — `whatsapp` sem `tea` (API síncrona + adapter `tea.Cmd` no `app`); motor de estado `core.Chats` puro com efeitos
-3. `04-async-io` — interface de store, SQLite e recibos fora do `Update()` via `tea.Cmd`, erros logados
-4. `05-split-app` — `app.go` quebrado por domínio + metas de cobertura + docs de arquitetura
+3. `04-async-io` — interface de store, SQLite e recibos fora do `Update()` via `tea.Cmd` (fila de escrita ordenada, abertura de chat assíncrona com guarda de troca), erros de persistência na status bar; só falha de conexão leva a `StateError`
+4. `05-split-app` — `app.go` quebrado por domínio + metas de cobertura (atingido: `app` 95%, `core` 99%, `whatsapp` 90%) + docs de arquitetura
 
 ---
 
@@ -385,7 +398,7 @@ watuid (systemd --user)
 
 - Cada conta tem seu próprio diretório: `data/accounts/<account-id>/` com `whatsmeow.db` e `watui.db` separados
 - Arquivo de contas: `~/.config/watui/accounts.toml` com lista de contas configuradas
-- Startup: inicializar todos os `whatsapp.Client` em paralelo; cada um tem seu `sendMsg` com prefixo de conta
+- Startup: inicializar todos os `whatsapp.Client` em paralelo; cada um com seu `SetEventHandler` embrulhando os eventos com o ID da conta
 - UI: indicador de conta ativa na title bar / status bar
 - Atalho para trocar conta ativa (e.g. `Ctrl+A` abre account switcher overlay)
 - Chat list mostra conversas da conta ativa (ou view unificada com badge de conta)
