@@ -28,7 +28,11 @@ type syncWAClient interface {
 	AltChatJID(ctx context.Context, jid string) string
 	DownloadMedia(ctx context.Context, msg core.Message) (string, error)
 	OpenMedia(path, mediaType string) error
+	RequestOlderHistory(ctx context.Context, oldest core.Message, count int) error
 }
+
+// olderHistoryPage is how many messages one on-demand history request asks for.
+const olderHistoryPage = 50
 
 var (
 	_ syncWAClient = (*whatsapp.Client)(nil)
@@ -156,6 +160,17 @@ func (a *waAdapter) OpenMedia(path, mediaType string) tea.Cmd {
 	return func() tea.Msg {
 		if err := a.c.OpenMedia(path, mediaType); err != nil {
 			return mediaOpenFailedMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+// RequestOlderHistory returns a command that asks the phone for the page of
+// history before oldest; failures come back as historyRequestFailedMsg.
+func (a *waAdapter) RequestOlderHistory(oldest core.Message) tea.Cmd {
+	return func() tea.Msg {
+		if err := a.c.RequestOlderHistory(context.Background(), oldest, olderHistoryPage); err != nil {
+			return historyRequestFailedMsg{Err: err}
 		}
 		return nil
 	}

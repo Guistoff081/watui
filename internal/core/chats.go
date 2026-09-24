@@ -238,9 +238,15 @@ func (c *Chats) AddOutgoing(msg Message) Effects {
 func (c *Chats) AddHistory(chatJID string, msgs []Message, viewing string) Effects {
 	jid := c.Resolve(chatJID)
 	c.mergeAliasCache(jid)
-	c.msgs[jid] = mergeMessages(c.msgs[jid], msgs)
+	before := c.msgs[jid]
+	c.msgs[jid] = mergeMessages(before, msgs)
 
 	eff := Effects{Chat: jid, Messages: msgs, InView: c.Resolve(viewing) == jid}
+	if eff.InView && len(before) > 0 {
+		// A page entirely older than what is shown (on-demand history from the
+		// phone) is prepended so the view keeps its place instead of reloading.
+		eff.Prepend = olderPage(before, msgs)
+	}
 	if len(msgs) > 0 {
 		latest := msgs[0]
 		for _, msg := range msgs {
@@ -419,18 +425,45 @@ func receiptsFor(chat string, isGroup bool, msgs []Message, unread int) []Receip
 	return out
 }
 
-// stickersToAutoDownload returns up to limit stickers that still need their
-// file downloaded, newest first. msgs is time-ascending, so walking backwards
-// favours the stickers visible at the bottom of the chat.
+// stickersToAutoDownload returns up to limit media messages whose preview
+// needs the file, newest first (msgs is time-ascending, so walking backwards
+// favours what is visible at the bottom of the chat): stickers not yet
+// downloaded (they carry no thumbnail), and poster media (animated stickers,
+// thumbnail-less GIFs) even when cached, since the download also creates the
+// still frame if it is missing. Videos are never fetched automatically.
 func stickersToAutoDownload(msgs []Message, limit int) []Message {
 	var out []Message
 	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
 		msg := msgs[i]
-		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
+		if msg.DirectPath == "" {
+			continue
+		}
+		if (msg.NeedsPoster() && msg.MediaType != "video") || (msg.MediaType == "sticker" && msg.MediaPath == "") {
 			out = append(out, msg)
 		}
 	}
 	return out
+}
+
+// olderPage returns the messages of batch not in cached, ascending, if every
+// one of them is older than cached's oldest; otherwise nil.
+func olderPage(cached, batch []Message) []Message {
+	seen := make(map[string]struct{}, len(cached))
+	for _, m := range cached {
+		seen[m.ID] = struct{}{}
+	}
+	oldest := cached[0].Timestamp
+	var fresh []Message
+	for _, m := range batch {
+		if _, dup := seen[m.ID]; dup {
+			continue
+		}
+		if !m.Timestamp.Before(oldest) {
+			return nil
+		}
+		fresh = append(fresh, m)
+	}
+	return mergeMessages(fresh)
 }
 
 // mergeMessages combines message lists into one slice, de-duplicating by ID

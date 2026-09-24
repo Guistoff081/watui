@@ -918,3 +918,37 @@ func TestAddMessageFillsUnnamedChatFromPushName(t *testing.T) {
 		t.Errorf("name = %q, push name must not override a known name", got)
 	}
 }
+
+func TestAutoDownloadIncludesPosterMedia(t *testing.T) {
+	msgs := []Message{
+		{ID: "gif", MediaType: "gif", DirectPath: "/d"},                                                       // no thumbnail: needs a poster
+		{ID: "gif-thumb", MediaType: "gif", DirectPath: "/d", Thumbnail: []byte{1}},                           // has its own preview
+		{ID: "anim-cached", MediaType: "sticker", IsAnimated: true, DirectPath: "/d", MediaPath: "/c/a.webp"}, // poster may be missing
+		{ID: "static-cached", MediaType: "sticker", DirectPath: "/d", MediaPath: "/c/s.webp"},
+		{ID: "video", MediaType: "video", DirectPath: "/d"}, // never auto-download full videos
+	}
+	got := msgIDs(stickersToAutoDownload(msgs, 10))
+	if want := []string{"anim-cached", "gif"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("auto-download = %v, want %v", got, want)
+	}
+}
+
+func TestAddHistoryOlderPageInViewIsPrepend(t *testing.T) {
+	c := NewChats(nil)
+	c.Load([]Conversation{{JID: pnJID}})
+	c.AddMessage(Message{ID: "n1", ChatJID: pnJID, Timestamp: time.Unix(500, 0)}, pnJID)
+
+	eff := c.AddHistory(pnJID, []Message{
+		{ID: "o2", ChatJID: pnJID, Timestamp: time.Unix(200, 0)},
+		{ID: "o1", ChatJID: pnJID, Timestamp: time.Unix(100, 0)},
+		{ID: "n1", ChatJID: pnJID, Timestamp: time.Unix(500, 0)}, // already cached
+	}, pnJID)
+	if got := msgIDs(eff.Prepend); !reflect.DeepEqual(got, []string{"o1", "o2"}) {
+		t.Errorf("Prepend = %v, want [o1 o2] (an older page for the open chat)", got)
+	}
+
+	eff = c.AddHistory(pnJID, []Message{{ID: "mid", ChatJID: pnJID, Timestamp: time.Unix(300, 0)}}, pnJID)
+	if len(eff.Prepend) != 0 {
+		t.Errorf("Prepend = %v for a message inside the loaded range, want a reload", msgIDs(eff.Prepend))
+	}
+}

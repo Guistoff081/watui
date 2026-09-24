@@ -45,10 +45,14 @@ type fakeSyncWA struct {
 	dlErr  error
 	dlMsg  core.Message
 
-	openErr   error
-	openPath  string
-	openType  string
-	disconned bool
+	openErr  error
+	openPath string
+
+	historyErr    error
+	historyAnchor string
+	historyCount  int
+	openType      string
+	disconned     bool
 }
 
 func (f *fakeSyncWA) Connect(context.Context) error { return f.connectErr }
@@ -103,6 +107,11 @@ func (f *fakeSyncWA) DownloadMedia(_ context.Context, msg core.Message) (string,
 func (f *fakeSyncWA) OpenMedia(path, mediaType string) error {
 	f.openPath, f.openType = path, mediaType
 	return f.openErr
+}
+
+func (f *fakeSyncWA) RequestOlderHistory(_ context.Context, oldest core.Message, count int) error {
+	f.historyAnchor, f.historyCount = oldest.ID, count
+	return f.historyErr
 }
 
 var adapterChat = types.NewJID("5511999999999", types.DefaultUserServer)
@@ -267,5 +276,20 @@ func TestAdapterPassThrough(t *testing.T) {
 	a.Disconnect()
 	if !f.disconned {
 		t.Error("Disconnect() not forwarded")
+	}
+}
+
+func TestAdapterRequestOlderHistory(t *testing.T) {
+	f := &fakeSyncWA{}
+	if got := newWAAdapter(f).RequestOlderHistory(core.Message{ID: "OLD"})(); got != nil {
+		t.Errorf("success msg = %#v, want nil", got)
+	}
+	if f.historyAnchor != "OLD" || f.historyCount != olderHistoryPage {
+		t.Errorf("request = (%q, %d), want (OLD, %d)", f.historyAnchor, f.historyCount, olderHistoryPage)
+	}
+	fail := errors.New("not connected")
+	got := newWAAdapter(&fakeSyncWA{historyErr: fail}).RequestOlderHistory(core.Message{ID: "OLD"})()
+	if msg, ok := got.(historyRequestFailedMsg); !ok || !errors.Is(msg.Err, fail) {
+		t.Errorf("failure msg = %#v, want historyRequestFailedMsg", got)
 	}
 }

@@ -97,3 +97,21 @@ func formatPhone(digits string) string {
 	}
 	return "+" + digits
 }
+
+// NeedsPoster reports whether m's preview must come from a still frame
+// extracted from the downloaded file: animated stickers (Go can't decode
+// animated WebP) and GIFs/videos that arrived without an embedded thumbnail.
+func (m Message) NeedsPoster() bool {
+	switch m.MediaType {
+	case "sticker":
+		return m.IsAnimated
+	case "gif", "video":
+		return len(m.Thumbnail) == 0
+	}
+	return false
+}
+
+// PosterPath is where the still frame for the media cached at mediaPath lives.
+func PosterPath(mediaPath string) string {
+	return mediaPath + ".poster.png"
+}

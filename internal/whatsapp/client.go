@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -37,6 +38,10 @@ type Client struct {
 	log      waLog.Logger
 	dbg      *debug.Logger
 	mediaDir string
+
+	// makePoster extracts a still frame from src into dst (PNG). Injected so
+	// tests don't need ffmpeg; see ffmpegPoster.
+	makePoster func(ctx context.Context, src, dst string) error
 }
 
 func NewClient(dbPath, mediaDir string, dbg *debug.Logger) (*Client, error) {
@@ -75,11 +80,12 @@ func NewClient(dbPath, mediaDir string, dbg *debug.Logger) (*Client, error) {
 	wm := whatsmeow.NewClient(deviceStore, log)
 
 	c := &Client{
-		wm:       wm,
-		store:    container,
-		log:      log,
-		dbg:      dbg,
-		mediaDir: mediaDir,
+		wm:         wm,
+		store:      container,
+		log:        log,
+		dbg:        dbg,
+		mediaDir:   mediaDir,
+		makePoster: ffmpegPoster,
 	}
 
 	wm.AddEventHandler(c.handleEvent)
@@ -400,6 +406,42 @@ func (c *Client) WMClient() *whatsmeow.Client {
 	return c.wm
 }
 
+// RequestOlderHistory asks the primary phone to send up to count messages
+// older than oldest in its chat (WhatsApp's on-demand history sync). The
+// answer arrives later as a HistorySync event and flows through the usual
+// ConversationUpdated/MessagesLoaded events; if the phone is offline nothing
+// arrives.
+func (c *Client) RequestOlderHistory(ctx context.Context, oldest core.Message, count int) error {
+	info, err := historyRequestInfo(oldest)
+	if err != nil {
+		return err
+	}
+	if _, err := c.wm.SendPeerMessage(ctx, c.wm.BuildHistorySyncRequest(info, count)); err != nil {
+		return fmt.Errorf("request history: %w", err)
+	}
+	return nil
+}
+
+// historyRequestInfo converts the oldest known message into the MessageInfo
+// an on-demand history request is anchored on.
+func historyRequestInfo(oldest core.Message) (*types.MessageInfo, error) {
+	if oldest.ID == "" {
+		return nil, errors.New("request history: oldest message has no ID")
+	}
+	chat, err := types.ParseJID(oldest.ChatJID)
+	if err != nil {
+		return nil, fmt.Errorf("request history: %w", err)
+	}
+	if chat.User == "" || chat.Server == "" {
+		return nil, fmt.Errorf("request history: invalid chat JID %q", oldest.ChatJID)
+	}
+	return &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, IsFromMe: oldest.IsFromMe},
+		ID:            types.MessageID(oldest.ID),
+		Timestamp:     oldest.Timestamp,
+	}, nil
+}
+
 // DownloadMedia downloads msg's media to the local cache (unless it is already
 // there) and returns the cached file path.
 func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, error) {
@@ -415,6 +457,7 @@ func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, e
 
 	// Already cached — return immediately without a network call.
 	if _, err := os.Stat(cachePath); err == nil {
+		c.ensurePoster(ctx, msg, cachePath)
 		return cachePath, nil
 	}
 
@@ -436,7 +479,37 @@ func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, e
 	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
 		return "", fmt.Errorf("write cache: %w", err)
 	}
+	c.ensurePoster(ctx, msg, cachePath)
 	return cachePath, nil
+}
+
+// ensurePoster writes the still-frame preview for media that needs one
+// (core.Message.NeedsPoster) if it doesn't exist yet. It is best-effort: a
+// missing ffmpeg only costs the inline preview, never the download.
+func (c *Client) ensurePoster(ctx context.Context, msg core.Message, path string) {
+	if !msg.NeedsPoster() || c.makePoster == nil {
+		return
+	}
+	poster := core.PosterPath(path)
+	if _, err := os.Stat(poster); err == nil {
+		return
+	}
+	if err := c.makePoster(ctx, path, poster); err != nil && c.dbg != nil {
+		c.dbg.Warn("poster extraction failed", "msg", msg.ID, "error", err.Error())
+	}
+}
+
+// ffmpegPoster extracts the first frame of src (animated WebP, MP4…) as PNG.
+func ffmpegPoster(ctx context.Context, src, dst string) error {
+	abs, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-y", "-i", abs, "-frames:v", "1", dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return os.Chmod(dst, 0o600)
 }
 
 // OpenMedia opens path in an appropriate external application. Audio/voice
@@ -479,8 +552,31 @@ func mediaOpenCommand(path, mediaType string, lookPath func(string) (string, err
 				return exec.Command(player, abs), nil
 			}
 		}
+	case "gif", "sticker":
+		// Image viewers like imv show animated WebP as a black window, and
+		// GIFs are really MP4s: loop them in mpv when available.
+		if mediaType == "gif" || isAnimatedWebP(abs) {
+			if _, err := lookPath("mpv"); err == nil {
+				return exec.Command("mpv", "--loop=inf", abs), nil
+			}
+		}
 	}
 	return exec.Command("xdg-open", abs), nil
+}
+
+// isAnimatedWebP reports whether path is an extended WebP (VP8X) with the
+// animation flag set.
+func isAnimatedWebP(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var h [21]byte
+	if _, err := io.ReadFull(f, h[:]); err != nil {
+		return false
+	}
+	return string(h[0:4]) == "RIFF" && string(h[8:16]) == "WEBPVP8X" && h[20]&0x02 != 0
 }
 
 // waMediaType maps a theme media-type string to the whatsmeow MediaType constant.
@@ -544,11 +640,9 @@ func extFromMime(mimeType string) string {
 	if idx := strings.IndexByte(mimeType, ';'); idx >= 0 {
 		mimeType = strings.TrimSpace(mimeType[:idx])
 	}
-	exts, _ := mime.ExtensionsByType(mimeType)
-	if len(exts) > 0 {
-		return exts[0]
-	}
-	// Reasonable fallbacks for common WhatsApp types.
+	// Common WhatsApp types first: the system MIME table can list rarer
+	// extensions first (.jfif for JPEG, .f4v for MP4), which viewers and
+	// xdg-open handle worse.
 	switch mimeType {
 	case "image/jpeg":
 		return ".jpg"
@@ -560,6 +654,9 @@ func extFromMime(mimeType string) string {
 		return ".ogg"
 	case "audio/mpeg":
 		return ".mp3"
+	}
+	if exts, _ := mime.ExtensionsByType(mimeType); len(exts) > 0 {
+		return exts[0]
 	}
 	return ""
 }

@@ -1,10 +1,15 @@
 package chatview
 
 import (
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/watui/watui/internal/core"
@@ -147,12 +152,20 @@ func TestRenderMessageAudioHasHint(t *testing.T) {
 func TestInvalidateThumbnailClearsEntry(t *testing.T) {
 	m := New()
 	m.SetSize(80, 24)
-	// Seed with the key format that InvalidateThumbnail generates (msgID + ":" + width).
-	key := "msg1:80"
-	m.thumbCache[key] = "CACHED"
+	// Entries are keyed msgID:cols for any column count; all of them go, and
+	// other messages' entries (even with a shared ID prefix) stay.
+	m.thumbCache["msg1:40"] = "CACHED"
+	m.thumbCache["msg1:12"] = "CACHED"
+	m.thumbCache["msg10:40"] = "OTHER"
 	m.InvalidateThumbnail("msg1")
-	if _, ok := m.thumbCache[key]; ok {
-		t.Error("InvalidateThumbnail did not remove cached entry")
+	if _, ok := m.thumbCache["msg1:40"]; ok {
+		t.Error("InvalidateThumbnail did not remove msg1:40")
+	}
+	if _, ok := m.thumbCache["msg1:12"]; ok {
+		t.Error("InvalidateThumbnail did not remove msg1:12")
+	}
+	if _, ok := m.thumbCache["msg10:40"]; !ok {
+		t.Error("InvalidateThumbnail removed another message's entry")
 	}
 }
 
@@ -233,5 +246,111 @@ func TestRenderMessageWrapsLongLines(t *testing.T) {
 		if w := lipgloss.Width(l); w > 60 {
 			t.Errorf("line width %d exceeds view width 60: %q", w, l)
 		}
+	}
+}
+
+// Animated stickers and thumbnail-less GIFs render their extracted still
+// frame (core.PosterPath) instead of an empty preview.
+func TestRenderMessageUsesPosterForAnimatedMedia(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "a.webp")
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for i := range img.Pix {
+		img.Pix[i] = 200
+	}
+	f, err := os.Create(core.PosterPath(media))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = png.Encode(f, img)
+	f.Close()
+
+	for _, msg := range []core.Message{
+		{ID: "st", MediaType: "sticker", IsAnimated: true, MediaPath: media, Timestamp: time.Unix(0, 0)},
+		{ID: "gf", MediaType: "gif", MediaPath: media, Timestamp: time.Unix(0, 0)},
+	} {
+		out := renderMessage(msg, 80, false, false, map[string]string{})
+		if !strings.Contains(out, "▀") {
+			t.Errorf("%s: no half-block preview rendered from the poster:\n%s", msg.MediaType, stripANSI(out))
+		}
+	}
+}
+
+// A preview rendered before the file/poster existed is cached as empty; the
+// download handler's InvalidateThumbnail must clear it so the next render
+// picks up the poster. The cache key uses the thumbnail column count, not
+// the view width, so invalidation has to drop every entry for the message.
+func TestInvalidateThumbnailPicksUpPosterCreatedLater(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "a.webp")
+	msg := core.Message{ID: "late", ChatJID: "c@s.whatsapp.net", MediaType: "sticker", IsAnimated: true,
+		MediaPath: media, Timestamp: time.Unix(0, 0)}
+
+	m := New()
+	m.SetSize(100, 30)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{msg})
+	if strings.Contains(m.View(), "▀") {
+		t.Fatal("preview rendered before the poster exists")
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for i := range img.Pix {
+		img.Pix[i] = 200
+	}
+	f, _ := os.Create(core.PosterPath(media))
+	_ = png.Encode(f, img)
+	f.Close()
+
+	m.InvalidateThumbnail("late")
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{msg})
+	if !strings.Contains(m.View(), "▀") {
+		t.Errorf("poster not rendered after InvalidateThumbnail:\n%s", stripANSI(m.View()))
+	}
+}
+
+func tallMsg(id string, ts int64, lines int) core.Message {
+	return core.Message{ID: id, ChatJID: "c@s.whatsapp.net", Content: strings.TrimSpace(strings.Repeat("linha\n", lines)),
+		Timestamp: time.Unix(ts, 0)}
+}
+
+// Selecting the newest message must scroll it fully into view; the last
+// message's bottom used to be computed as its top line + 1, leaving a tall
+// message (e.g. a video thumbnail) cut at the bottom edge.
+func TestSelectNewestTallMessageScrollsToItsBottom(t *testing.T) {
+	m := New()
+	m.SetSize(60, 10)
+	m.SetFocused(true)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{tallMsg("a", 100, 3), tallMsg("b", 200, 3), tallMsg("tall", 300, 12)})
+
+	m.viewport.GotoTop()
+	for i := 0; i < 5; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if !m.viewport.AtBottom() {
+		t.Errorf("newest message selected but viewport not at bottom (YOffset %d of %d lines)",
+			m.viewport.YOffset, m.viewport.TotalLineCount())
+	}
+}
+
+// Loading older messages keeps the message that was on top at the same
+// screen row, instead of an estimate that ignored the removed loading line
+// and a date separator shared with the new page.
+func TestPrependKeepsPreviousTopMessageAnchored(t *testing.T) {
+	m := New()
+	m.SetSize(60, 10)
+	m.SetFocused(true)
+	day := int64(86400 * 20000)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{tallMsg("x", day+300, 2), tallMsg("y", day+400, 20)})
+	m.viewport.GotoTop()
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}) // first key selects the newest message
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	beforeRow := m.lineOffsets[0] - m.viewport.YOffset
+
+	m.PrependMessages([]core.Message{tallMsg("o1", day+100, 2), tallMsg("o2", day+200, 2)}) // same day as x
+	idx := 2                                                                                // x after the prepend
+	if got := m.lineOffsets[idx] - m.viewport.YOffset; got != beforeRow {
+		t.Errorf("previous top message moved from row %d to row %d after prepend", beforeRow, got)
 	}
 }
