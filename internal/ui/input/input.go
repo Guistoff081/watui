@@ -142,6 +142,27 @@ func (m Model) Value() string { return m.textarea.Value() }
 
 func (m *Model) Reset() { m.textarea.Reset() }
 
+// StartFilePrompt switches to the file-path prompt (what ctrl+f does). The
+// input must be focused.
+func (m *Model) StartFilePrompt() tea.Cmd { return m.startPrompt(modeFile, "File path...") }
+
+// StartAudioPrompt switches to the audio-path prompt (what ctrl+p does).
+func (m *Model) StartAudioPrompt() tea.Cmd { return m.startPrompt(modeAudio, "Audio file path...") }
+
+// PickFile opens the GUI file picker (what ctrl+o does in text mode).
+func (m *Model) PickFile() tea.Cmd { return pickFileCmd(false) }
+
+// InPathPrompt reports whether a file/audio path prompt is active.
+func (m Model) InPathPrompt() bool { return m.mode == modeFile || m.mode == modeAudio }
+
+func (m *Model) startPrompt(mode inputMode, placeholder string) tea.Cmd {
+	m.mode = mode
+	m.pathInput.Placeholder = placeholder
+	m.textarea.Blur()
+	m.pathInput.Reset()
+	return m.pathInput.Focus()
+}
+
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.focused {
 		return m, nil
@@ -186,21 +207,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case modeText:
 			switch msg.String() {
 			case "ctrl+f":
-				m.mode = modeFile
-				m.pathInput.Placeholder = "File path..."
-				m.textarea.Blur()
-				m.pathInput.Reset()
-				return m, m.pathInput.Focus()
+				return m, m.StartFilePrompt()
 
 			case "ctrl+p":
-				m.mode = modeAudio
-				m.pathInput.Placeholder = "Audio file path..."
-				m.textarea.Blur()
-				m.pathInput.Reset()
-				return m, m.pathInput.Focus()
+				return m, m.StartAudioPrompt()
 
 			case "ctrl+o":
-				return m, pickFileCmd(false)
+				return m, m.PickFile()
 
 			case "enter":
 				text := strings.TrimSpace(m.textarea.Value())
