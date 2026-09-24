@@ -153,6 +153,19 @@ func (c *Chats) ApplyNames(names map[string]string) Effects {
 	return eff
 }
 
+// UnnamedDirectChats returns the 1:1 chats that have no name yet (none, or
+// just their JID), sorted: the candidates for a verified-business lookup.
+func (c *Chats) UnnamedDirectChats() []string {
+	var out []string
+	for jid, conv := range c.convs {
+		if !conv.IsGroup && !strings.HasSuffix(jid, "@g.us") && (conv.Name == "" || conv.Name == jid) {
+			out = append(out, jid)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // UpdateConversation stores a conversation update from the session. History
 // sync may compute Last* from a partial batch, so an update never regresses
 // the preview to an older message.

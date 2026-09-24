@@ -25,6 +25,7 @@ type syncWAClient interface {
 	MarkRead(ctx context.Context, chatJID, sender types.JID, messageIDs []string) error
 	GetAllContactNames(ctx context.Context) (map[string]string, error)
 	GetGroupNames(ctx context.Context) (map[string]string, error)
+	GetVerifiedNames(ctx context.Context, jids []string) (map[string]string, error)
 	AltChatJID(ctx context.Context, jid string) string
 	DownloadMedia(ctx context.Context, msg core.Message) (string, error)
 	OpenMedia(path, mediaType string) error
@@ -174,4 +175,12 @@ func (a *waAdapter) RequestOlderHistory(oldest core.Message) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// GetVerifiedNames looks up verified business names. Lookups are batched, so
+// names found before an error are still returned; the error only means some
+// chats stay unnamed until the next lookup.
+func (a *waAdapter) GetVerifiedNames(jids []string) map[string]string {
+	names, _ := a.c.GetVerifiedNames(context.Background(), jids)
+	return names
 }

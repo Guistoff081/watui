@@ -62,7 +62,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetMessage("Loading conversations...")
 		m.applyFocus()
 		m.layout()
-		cmds = append(cmds, m.loadConversationsCmd(), m.loadContactNamesCmd())
+		// Names are resolved once the stored conversations are loaded (see
+		// conversationsLoadedMsg), so unnamed chats can be looked up.
+		cmds = append(cmds, m.loadConversationsCmd())
 
 	case core.LoginFailed:
 		m.state = StateError
@@ -112,6 +114,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatList.UpsertConversation(conv)
 		}
 		m.statusBar.ClearMessage()
+		cmds = append(cmds, m.loadContactNamesCmd())
 
 	case contactNamesMsg:
 		cmds = append(cmds, m.applyEffects(m.chats.ApplyNames(msg.Names)))
