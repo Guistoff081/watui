@@ -234,12 +234,13 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 		}
 
 		key := wmi.GetKey()
-		if !isDisplayable(wmi.Message) {
-			r.skipped(key.GetID(), wmi.Message)
+		content := unwrapMessage(wmi.Message)
+		if !isDisplayable(content) {
+			r.skipped(key.GetID(), content)
 			continue
 		}
 
-		msg := newCoreMessage(wmi.Message)
+		msg := newCoreMessage(content)
 		msg.ID = key.GetID()
 		msg.ChatJID = canonicalStr
 		msg.SenderJID = key.GetParticipant()
@@ -263,6 +264,35 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 	}
 
 	return convModel, messages, true
+}
+
+// unwrapMessage strips the container messages WhatsApp wraps real content in
+// (disappearing-chat EphemeralMessage, view-once, DocumentWithCaption, bot
+// invoke, lottie sticker, device-sent echoes). Live messages arrive already
+// unwrapped by whatsmeow's events.Message.UnwrapRaw; history-sync messages do
+// not, so without this they would render as "[media]".
+//
+// It mirrors UnwrapRaw's order, with one deliberate difference: EditedMessage
+// stays wrapped, so edits keep being dropped as non-displayable instead of
+// appearing as a duplicate bubble.
+func unwrapMessage(msg *waProto.Message) *waProto.Message {
+	if m := msg.GetDeviceSentMessage().GetMessage(); m != nil {
+		msg = m
+	}
+	for _, wrapper := range []func(*waProto.Message) *waProto.FutureProofMessage{
+		(*waProto.Message).GetBotInvokeMessage,
+		(*waProto.Message).GetEphemeralMessage,
+		(*waProto.Message).GetViewOnceMessage,
+		(*waProto.Message).GetViewOnceMessageV2,
+		(*waProto.Message).GetViewOnceMessageV2Extension,
+		(*waProto.Message).GetLottieStickerMessage,
+		(*waProto.Message).GetDocumentWithCaptionMessage,
+	} {
+		if m := wrapper(msg).GetMessage(); m != nil {
+			msg = m
+		}
+	}
+	return msg
 }
 
 // newCoreMessage fills the content and media fields of a core.Message from a
