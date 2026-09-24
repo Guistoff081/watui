@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/theme"
@@ -174,7 +175,8 @@ func (m Model) View() string {
 	}
 
 	content := strings.Join(lines, "\n")
-	return style.Width(m.width).Height(m.height).Render(content)
+	// MaxHeight clips: a taller panel makes Bubble Tea drop frame lines.
+	return style.Width(m.width).Height(m.height).MaxHeight(m.height).Render(content)
 }
 
 func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
@@ -189,9 +191,7 @@ func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
 	if nameMaxW < 0 {
 		nameMaxW = 0
 	}
-	if lipgloss.Width(name) > nameMaxW {
-		name = name[:max(0, nameMaxW-1)] + "…"
-	}
+	name = ansi.Truncate(name, nameMaxW, "…")
 
 	// First line: name + time
 	nameStyle := theme.ChatItemName
@@ -213,9 +213,7 @@ func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
 	if unread != "" {
 		previewMaxW = w - lipgloss.Width(unread) - 2
 	}
-	if lipgloss.Width(preview) > previewMaxW {
-		preview = preview[:max(0, previewMaxW-1)] + "…"
-	}
+	preview = ansi.Truncate(preview, max(0, previewMaxW), "…")
 
 	previewRendered := theme.ChatItemPreview.Render(preview)
 	line2 := previewRendered
@@ -224,7 +222,9 @@ func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
 		line2 = previewRendered + strings.Repeat(" ", gap2) + theme.ChatItemUnread.Render(unread)
 	}
 
-	block := line1 + "\n" + line2 + "\n"
+	// Both rows share the 2-column prefix gutter so the preview lines up
+	// under the name.
+	block := line1 + "\n  " + line2 + "\n"
 
 	if isSelected {
 		prefix := ">"
@@ -233,7 +233,7 @@ func (m Model) renderItem(item Item, isSelected, isCurrent bool) string {
 		}
 		block = lipgloss.NewStyle().
 			Background(theme.ColorBgInput).
-			Width(w).
+			Width(w + 2). // prefix gutter + content
 			Render(prefix + " " + block)
 	} else {
 		prefix := " "

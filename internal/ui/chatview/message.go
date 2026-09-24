@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/watui/watui/internal/core"
 	"github.com/watui/watui/internal/theme"
@@ -23,6 +24,16 @@ func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, t
 	timeStr := msg.Timestamp.Format("15:04")
 	statusIcon := statusToIcon(msg.Status)
 
+	var style lipgloss.Style
+	if msg.IsFromMe {
+		style = theme.MyMessageStyle
+	} else {
+		style = theme.OtherMessageStyle
+	}
+	// Text is wrapped to the space inside the bubble's padding: MaxWidth alone
+	// truncates each line, which cut long messages at the bubble edge.
+	innerW := max(1, maxBubbleW-style.GetHorizontalFrameSize()-1) // -1: selection border
+
 	var bubbleContent strings.Builder
 
 	// Group sender name
@@ -38,7 +49,7 @@ func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, t
 		bubbleContent.WriteString(renderMediaBody(msg, maxBubbleW, thumbCache))
 		bubbleContent.WriteString("\n")
 	} else {
-		bubbleContent.WriteString(msg.Content)
+		bubbleContent.WriteString(ansi.Wrap(msg.Content, innerW, ""))
 	}
 
 	// Timestamp + status
@@ -46,15 +57,19 @@ func renderMessage(msg core.Message, width int, isGroup bool, isSelected bool, t
 	if msg.IsFromMe {
 		meta += " " + statusIcon
 	}
-	bubbleContent.WriteString("  ")
+	// Keep the timestamp on the last line when it fits, else on its own line.
+	lastLine := bubbleContent.String()
+	if i := strings.LastIndexByte(lastLine, '\n'); i >= 0 {
+		lastLine = lastLine[i+1:]
+	}
+	if ansi.StringWidth(lastLine)+2+ansi.StringWidth(meta) > innerW {
+		bubbleContent.WriteString("\n")
+	} else {
+		bubbleContent.WriteString("  ")
+	}
 	bubbleContent.WriteString(meta)
 
-	var style lipgloss.Style
-	if msg.IsFromMe {
-		style = theme.MyMessageStyle.MaxWidth(maxBubbleW)
-	} else {
-		style = theme.OtherMessageStyle.MaxWidth(maxBubbleW)
-	}
+	style = style.MaxWidth(maxBubbleW)
 
 	if isSelected {
 		style = style.BorderLeft(true).

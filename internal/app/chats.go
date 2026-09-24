@@ -18,7 +18,7 @@ func (m *Model) selectChat(jid string) (Model, tea.Cmd) {
 		return *m, nil
 	}
 
-	m.titleBar.SetChat(conv.Name, conv.JID, conv.IsGroup)
+	m.titleBar.SetChat(core.DisplayName(conv), conv.JID, conv.IsGroup)
 	m.reloadChatView(jid)
 	m.openGen++
 	return *m, tea.Batch(m.loadChatCmd(jid, m.openGen), m.setFocus(PanelMessages))

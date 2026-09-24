@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Conversation struct {
 	JID         string
@@ -64,4 +67,33 @@ func (m Message) PreviewText() string {
 		return tag + " " + m.Content
 	}
 	return tag
+}
+
+// DisplayName returns the name to show for conv. Chats with no known name
+// (numbers outside the address book with no push name) fall back to the
+// phone number instead of the raw JID, like WhatsApp does.
+func DisplayName(conv Conversation) string {
+	if conv.Name != "" && conv.Name != conv.JID {
+		return conv.Name
+	}
+	user, server, ok := strings.Cut(conv.JID, "@")
+	if !ok || server != "s.whatsapp.net" {
+		return conv.JID
+	}
+	if user == "0" {
+		return "WhatsApp" // official service account
+	}
+	return formatPhone(user)
+}
+
+// formatPhone renders an international number the way WhatsApp does for
+// Brazil (+55 AA NNNNN-NNNN / +55 AA NNNN-NNNN); other countries get the
+// plain digits, since their grouping rules vary.
+func formatPhone(digits string) string {
+	if strings.HasPrefix(digits, "55") && (len(digits) == 12 || len(digits) == 13) {
+		area, local := digits[2:4], digits[4:]
+		split := len(local) - 4
+		return "+55 " + area + " " + local[:split] + "-" + local[split:]
+	}
+	return "+" + digits
 }

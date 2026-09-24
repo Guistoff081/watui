@@ -458,9 +458,9 @@ func TestAddMessagePreviewUsesPreviewText(t *testing.T) {
 func TestAddMessageCreatesConversation(t *testing.T) {
 	c := NewChats(nil)
 
-	eff := c.AddMessage(Message{ID: "g1", ChatJID: "g@g.us", SenderName: "Alice", Content: "hi", Timestamp: time.Unix(100, 0)}, "")
-	conv, ok := c.Conversation("g@g.us")
-	want := Conversation{JID: "g@g.us", Name: "Alice", IsGroup: true, LastMessage: "hi", LastMsgTime: time.Unix(100, 0), UnreadCount: 1}
+	eff := c.AddMessage(Message{ID: "p1", ChatJID: "p@s.whatsapp.net", SenderName: "Alice", Content: "hi", Timestamp: time.Unix(100, 0)}, "")
+	conv, ok := c.Conversation("p@s.whatsapp.net")
+	want := Conversation{JID: "p@s.whatsapp.net", Name: "Alice", LastMessage: "hi", LastMsgTime: time.Unix(100, 0), UnreadCount: 1}
 	if !ok || conv != want {
 		t.Fatalf("conv = %+v, want %+v", conv, want)
 	}
@@ -888,5 +888,33 @@ func TestSetMediaPathAndFind(t *testing.T) {
 	}
 	if eff := c.SetMediaPath(pnJID, "img", "/x", "other@s.whatsapp.net"); eff.InView {
 		t.Errorf("InView = true, want false for other chat")
+	}
+}
+
+func TestAddMessageNewGroupNotNamedAfterSender(t *testing.T) {
+	c := NewChats(nil)
+	eff := c.AddMessage(Message{ID: "g1", ChatJID: "123@g.us", SenderName: "Membro", Timestamp: time.Unix(1, 0)}, "")
+	if got := eff.Conversations[0].Name; got == "Membro" {
+		t.Errorf("new group named %q after the sender's push name", got)
+	}
+}
+
+func TestAddMessageFillsUnnamedChatFromPushName(t *testing.T) {
+	c := NewChats(nil)
+	c.Load([]Conversation{{JID: pnJID}})
+
+	eff := c.AddMessage(Message{ID: "own", ChatJID: pnJID, SenderName: "Eu", IsFromMe: true, Timestamp: time.Unix(1, 0)}, "")
+	if got := eff.Conversations[0].Name; got != "" {
+		t.Errorf("name from own message = %q, want unchanged", got)
+	}
+	eff = c.AddMessage(Message{ID: "in", ChatJID: pnJID, SenderName: "Loja", Timestamp: time.Unix(2, 0)}, "")
+	if got := eff.Conversations[0].Name; got != "Loja" {
+		t.Errorf("name = %q, want push name Loja", got)
+	}
+
+	c.Load([]Conversation{{JID: "named@s.whatsapp.net", Name: "Agenda"}})
+	eff = c.AddMessage(Message{ID: "n", ChatJID: "named@s.whatsapp.net", SenderName: "Outro", Timestamp: time.Unix(3, 0)}, "")
+	if got := eff.Conversations[0].Name; got != "Agenda" {
+		t.Errorf("name = %q, push name must not override a known name", got)
 	}
 }

@@ -150,11 +150,13 @@ func (a *waAdapter) DownloadMedia(msg core.Message) tea.Cmd {
 	}
 }
 
-// OpenMedia returns a command that launches an external viewer. It yields no
-// message: a viewer that fails to start has always been ignored.
+// OpenMedia returns a command that launches an external viewer; a failure
+// (no player, no handler for the type) comes back as mediaOpenFailedMsg.
 func (a *waAdapter) OpenMedia(path, mediaType string) tea.Cmd {
 	return func() tea.Msg {
-		_ = a.c.OpenMedia(path, mediaType)
+		if err := a.c.OpenMedia(path, mediaType); err != nil {
+			return mediaOpenFailedMsg{Err: err}
+		}
 		return nil
 	}
 }

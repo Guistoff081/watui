@@ -74,8 +74,23 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 	case *events.HistorySync:
 		c.handleHistorySync(evt)
 
+	case *events.BusinessName:
+		if evt.NewBusinessName != "" {
+			c.send(core.ContactNameChanged{
+				JID:  c.canonicalChatJID(evt.JID, types.EmptyJID).String(),
+				Name: evt.NewBusinessName,
+			})
+		}
+
 	case *events.PushName:
-		// Could update contact names
+		// whatsmeow already stored it; tell the app so an unnamed chat (a
+		// number outside the address book) picks it up without a restart.
+		if evt.NewPushName != "" {
+			c.send(core.ContactNameChanged{
+				JID:  c.canonicalChatJID(evt.JID, evt.JIDAlt).String(),
+				Name: evt.NewPushName,
+			})
+		}
 	}
 }
 
@@ -89,10 +104,16 @@ func (c *Client) handleMessage(evt *events.Message) {
 	senderJID := c.canonicalSenderFromInfo(evt.Info)
 
 	msg := newCoreMessage(evt.Message)
+	if msg.Content == unsupportedPlaceholder {
+		c.logUnsupported(evt.Info.ID, evt.Message)
+	}
 	msg.ID = evt.Info.ID
 	msg.ChatJID = chatJID.String()
 	msg.SenderJID = senderJID.String()
 	msg.SenderName = evt.Info.PushName
+	if vn := evt.Info.VerifiedName; vn != nil && vn.Details.GetVerifiedName() != "" {
+		msg.SenderName = vn.Details.GetVerifiedName() // businesses show their verified name
+	}
 	msg.Timestamp = evt.Info.Timestamp
 	msg.IsFromMe = evt.Info.IsFromMe
 	msg.Status = "received"
@@ -173,6 +194,8 @@ type historyResolver interface {
 	groupName(jid types.JID) string
 	// skipped is told about each non-displayable message that was dropped.
 	skipped(id string, msg *waProto.Message)
+	// unsupported is told about each kept message whose kind has no rendering.
+	unsupported(id string, msg *waProto.Message)
 }
 
 type clientHistoryResolver struct {
@@ -195,6 +218,10 @@ func (r *clientHistoryResolver) groupName(jid types.JID) string {
 
 func (r *clientHistoryResolver) skipped(id string, msg *waProto.Message) {
 	r.c.logSkipped(id, msg)
+}
+
+func (r *clientHistoryResolver) unsupported(id string, msg *waProto.Message) {
+	r.c.logUnsupported(id, msg)
 }
 
 // convertHistoryConversation converts one history-sync conversation into the
@@ -228,6 +255,7 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 	}
 
 	var messages []core.Message
+	var pushNameTime time.Time
 	for _, hm := range conv.GetMessages() {
 		wmi := hm.GetMessage()
 		if wmi == nil || wmi.Message == nil {
@@ -250,9 +278,22 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 		msg.Status = "received"
 		if msg.IsFromMe {
 			msg.Status = "read"
+		} else {
+			// Businesses show their verified name, like WhatsApp does.
+			msg.SenderName = firstNonEmpty(wmi.GetVerifiedBizName(), wmi.GetPushName())
+		}
+		if msg.Content == unsupportedPlaceholder {
+			r.unsupported(msg.ID, content)
 		}
 
 		messages = append(messages, msg)
+
+		// Numbers outside the address book have no contact name; the newest
+		// push name they sent is the best label (WhatsApp shows "~Name").
+		if name == "" && !isGroup && msg.SenderName != "" && !msg.Timestamp.Before(pushNameTime) {
+			convModel.Name = msg.SenderName
+			pushNameTime = msg.Timestamp
+		}
 
 		if msg.Timestamp.After(convModel.LastMsgTime) {
 			convModel.LastMsgTime = msg.Timestamp
@@ -317,16 +358,20 @@ func unwrapMessage(msg *waProto.Message) *waProto.Message {
 	return msg
 }
 
+// unsupportedPlaceholder is the content of displayable messages whose kind we
+// cannot render yet; the populated proto fields are logged at debug level.
+const unsupportedPlaceholder = "[unsupported message]"
+
 // newCoreMessage fills the content and media fields of a core.Message from a
 // displayable message. Media messages carry their bare caption (possibly "")
-// as Content; other kinds get a text rendering, or "[media]" when none exists.
+// as Content; other kinds get a text rendering, or unsupportedPlaceholder when none exists.
 func newCoreMessage(m *waProto.Message) core.Message {
 	meta := extractMedia(m)
 	content := meta.caption
 	if meta.mediaType == "" {
 		content = extractTextContent(m)
 		if content == "" {
-			content = "[media]"
+			content = unsupportedPlaceholder
 		}
 	}
 	return core.Message{
@@ -392,6 +437,16 @@ func isDisplayable(msg *waProto.Message) bool {
 
 // logSkipped records which populated fields caused a message to be dropped.
 func (c *Client) logSkipped(id string, msg *waProto.Message) {
+	c.logFields("skipping non-displayable message", id, msg)
+}
+
+// logUnsupported records the fields of a message shown as unsupportedPlaceholder,
+// so new kinds can be identified from the debug log and rendered.
+func (c *Client) logUnsupported(id string, msg *waProto.Message) {
+	c.logFields("unsupported message kind", id, msg)
+}
+
+func (c *Client) logFields(what, id string, msg *waProto.Message) {
 	if c.dbg == nil {
 		return
 	}
@@ -402,7 +457,7 @@ func (c *Client) logSkipped(id string, msg *waProto.Message) {
 			return true
 		})
 	}
-	c.dbg.Debug("skipping non-displayable message", "id", id, "fields", strings.Join(fields, ","))
+	c.dbg.Debug(what, "id", id, "fields", strings.Join(fields, ","))
 }
 
 type mediaMeta struct {
@@ -547,6 +602,121 @@ func extractTextContent(msg *waProto.Message) string {
 	}
 	if msg.ContactMessage != nil {
 		return "[contact] " + msg.ContactMessage.GetDisplayName()
+	}
+	return extractStructuredText(msg)
+}
+
+// extractStructuredText renders the message kinds businesses and newer clients
+// send (templates, buttons, lists, polls, call logs…). Without it they fell
+// back to "[media]", which is most of what unsaved business numbers send.
+func extractStructuredText(msg *waProto.Message) string {
+	switch {
+	case msg.TemplateMessage != nil:
+		t := msg.TemplateMessage
+		if i := t.GetInteractiveMessageTemplate(); i != nil {
+			return interactiveText(i)
+		}
+		h := t.GetHydratedTemplate()
+		if h == nil {
+			h = t.GetHydratedFourRowTemplate()
+		}
+		tag := headerTag(h.GetImageMessage() != nil, h.GetVideoMessage() != nil,
+			h.GetDocumentMessage() != nil, h.GetLocationMessage() != nil)
+		return tagged(tag, firstNonEmpty(h.GetHydratedContentText(), h.GetHydratedTitleText()))
+	case msg.InteractiveMessage != nil:
+		return interactiveText(msg.InteractiveMessage)
+	case msg.ButtonsMessage != nil:
+		return firstNonEmpty(msg.ButtonsMessage.GetContentText(), msg.ButtonsMessage.GetText())
+	case msg.ListMessage != nil:
+		return firstNonEmpty(msg.ListMessage.GetDescription(), msg.ListMessage.GetTitle())
+	case msg.ButtonsResponseMessage != nil:
+		return msg.ButtonsResponseMessage.GetSelectedDisplayText()
+	case msg.TemplateButtonReplyMessage != nil:
+		return msg.TemplateButtonReplyMessage.GetSelectedDisplayText()
+	case msg.ListResponseMessage != nil:
+		return msg.ListResponseMessage.GetTitle()
+	case msg.InteractiveResponseMessage != nil:
+		return msg.InteractiveResponseMessage.GetBody().GetText()
+	case msg.HighlyStructuredMessage != nil:
+		return msg.HighlyStructuredMessage.GetHydratedHsm().GetHydratedTemplate().GetHydratedContentText()
+	}
+	for _, p := range []*waProto.PollCreationMessage{
+		msg.PollCreationMessage, msg.PollCreationMessageV2, msg.PollCreationMessageV3,
+		msg.PollCreationMessageV5, msg.PollCreationMessageV6,
+	} {
+		if p != nil {
+			return tagged("[poll]", p.GetName())
+		}
+	}
+	switch {
+	case msg.CallLogMesssage != nil:
+		if msg.CallLogMesssage.GetIsVideo() {
+			return "[video call]"
+		}
+		return "[call]"
+	case msg.PtvMessage != nil:
+		return "[video note]"
+	case msg.LiveLocationMessage != nil:
+		return "[live location]"
+	case msg.ContactsArrayMessage != nil:
+		return "[contacts]"
+	case msg.GroupInviteMessage != nil:
+		return tagged("[group invite]", msg.GroupInviteMessage.GetGroupName())
+	case msg.EventMessage != nil:
+		return tagged("[event]", msg.EventMessage.GetName())
+	case msg.ProductMessage != nil:
+		return tagged("[product]", msg.ProductMessage.GetProduct().GetTitle())
+	case msg.OrderMessage != nil:
+		return "[order]"
+	case msg.RequestPaymentMessage != nil, msg.SendPaymentMessage != nil, msg.PaymentInviteMessage != nil:
+		return "[payment]"
+	case msg.AlbumMessage != nil:
+		return "[album]"
+	}
+	return ""
+}
+
+// interactiveText renders an interactive message: its body (or header title),
+// prefixed with the header media kind when there is one.
+func interactiveText(i *waProto.InteractiveMessage) string {
+	h := i.GetHeader()
+	tag := headerTag(h.GetImageMessage() != nil, h.GetVideoMessage() != nil,
+		h.GetDocumentMessage() != nil, h.GetLocationMessage() != nil)
+	return tagged(tag, firstNonEmpty(i.GetBody().GetText(), h.GetTitle()))
+}
+
+// headerTag names the media shown above a template/interactive message, as
+// WhatsApp's list preview does with its camera/video icons.
+func headerTag(image, video, document, location bool) string {
+	switch {
+	case image:
+		return "[image]"
+	case video:
+		return "[video]"
+	case document:
+		return "[file]"
+	case location:
+		return "[location]"
+	}
+	return ""
+}
+
+// tagged joins a kind tag and an optional detail ("[poll] Lunch?" / "[poll]").
+func tagged(tag, detail string) string {
+	switch {
+	case tag == "":
+		return detail
+	case detail == "":
+		return tag
+	}
+	return tag + " " + detail
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
 	}
 	return ""
 }

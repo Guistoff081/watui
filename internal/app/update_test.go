@@ -36,8 +36,9 @@ func TestHandleNewMessageCreatesConversation(t *testing.T) {
 	m = send(t, m, core.NewMessage{Message: core.Message{ID: "m1", ChatJID: "g@g.us", SenderName: "Alice", Content: "hi", Timestamp: time.Unix(100, 0)}})
 
 	stored, _ := s.GetAllConversations(context.Background())
-	if len(stored) != 1 || stored[0].JID != "g@g.us" || !stored[0].IsGroup || stored[0].Name != "Alice" {
-		t.Fatalf("stored conversations = %+v, want new group g@g.us named Alice", stored)
+	// Group subjects arrive via group names; a member's push name is not one.
+	if len(stored) != 1 || stored[0].JID != "g@g.us" || !stored[0].IsGroup || stored[0].Name == "Alice" {
+		t.Fatalf("stored conversations = %+v, want new group g@g.us not named after its sender", stored)
 	}
 }
 
@@ -194,5 +195,21 @@ func TestOlderMessagesDedupedAndPrepended(t *testing.T) {
 	m = send(t, m, olderMessagesLoadedMsg{ChatJID: jid})
 	if got := len(m.chats.Messages(jid)); got != 2 {
 		t.Errorf("cache len = %d after empty page, want 2", got)
+	}
+}
+
+func TestContactNameChangedNamesUnknownChat(t *testing.T) {
+	m, _ := newTestModel(t)
+	jid := "5511999999999@s.whatsapp.net"
+	m.chats.Load([]core.Conversation{{JID: jid}, {JID: "k@s.whatsapp.net", Name: "Agenda"}})
+
+	m = send(t, m, core.ContactNameChanged{JID: jid, Name: "Loja"})
+	m = send(t, m, core.ContactNameChanged{JID: "k@s.whatsapp.net", Name: "Outro"})
+
+	if conv, _ := m.chats.Conversation(jid); conv.Name != "Loja" {
+		t.Errorf("unknown chat name = %q, want Loja", conv.Name)
+	}
+	if conv, _ := m.chats.Conversation("k@s.whatsapp.net"); conv.Name != "Agenda" {
+		t.Errorf("known chat name = %q, push name must not override", conv.Name)
 	}
 }
