@@ -123,3 +123,19 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) tea.Cmd {
 		return s.UpdateMessageStatus(ctx, msgID, status)
 	}})
 }
+
+// olderFromPhone runs when the local store has no older messages for jid: it
+// asks the phone for the page before the oldest cached message, once per
+// anchor. A repeat from the same anchor means the phone sent nothing older,
+// so the view stops asking.
+func (m *Model) olderFromPhone(jid string) tea.Cmd {
+	msgs := m.chats.Messages(jid)
+	if len(msgs) == 0 || m.historyAsked[jid] == msgs[0].ID {
+		m.chatView.SetNoMoreMessages()
+		return nil
+	}
+	m.historyAsked[jid] = msgs[0].ID
+	m.chatView.StopLoading()
+	m.statusBar.SetMessage("Asking your phone for older messages…")
+	return tea.Batch(m.wa.RequestOlderHistory(msgs[0]), m.clearStatusAfter(statusTimeout))
+}

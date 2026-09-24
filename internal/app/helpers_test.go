@@ -29,6 +29,7 @@ func (fakeWA) GetGroupNames() map[string]string                   { return nil }
 func (fakeWA) AltChatJID(jid string) string                       { return "" }
 func (fakeWA) DownloadMedia(core.Message) tea.Cmd                 { return nil }
 func (fakeWA) OpenMedia(string, string) tea.Cmd                   { return nil }
+func (fakeWA) RequestOlderHistory(core.Message) tea.Cmd           { return nil }
 
 // markReadCall records one MarkRead invocation.
 type markReadCall struct {
@@ -56,6 +57,14 @@ type recordingWA struct {
 	disconnected bool
 	presence     []bool   // SendChatPresence composing values, in order
 	texts        []string // SendTextMessage bodies
+	historyReqs  []string // RequestOlderHistory anchor message IDs
+}
+
+func (r *recordingWA) RequestOlderHistory(oldest core.Message) tea.Cmd {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.historyReqs = append(r.historyReqs, oldest.ID)
+	return func() tea.Msg { return nil }
 }
 
 func (r *recordingWA) Connect() tea.Cmd {

@@ -168,6 +168,21 @@ func (m *Model) SetNoMoreMessages() {
 	m.noMore = true
 }
 
+// StopLoading clears the "Loading older messages..." state without marking
+// the end of history (more may still arrive, e.g. from the phone).
+func (m *Model) StopLoading() {
+	if m.loading {
+		m.loading = false
+		m.rebuildContent()
+	}
+}
+
+// NoMoreMessages reports whether the view stopped requesting older pages.
+func (m Model) NoMoreMessages() bool { return m.noMore }
+
+// Messages returns the messages currently shown (read-only).
+func (m Model) Messages() []core.Message { return m.messages }
+
 func (m *Model) UpdateMessageStatus(msgID, status string) {
 	for i := range m.messages {
 		if m.messages[i].ID == msgID {
