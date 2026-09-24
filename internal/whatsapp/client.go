@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rs/zerolog"
 	"github.com/watui/watui/internal/core"
@@ -33,7 +32,7 @@ import (
 type Client struct {
 	wm       *whatsmeow.Client
 	store    *sqlstore.Container
-	sendMsg  func(tea.Msg)
+	onEvent  func(core.Event)
 	mu       sync.Mutex
 	log      waLog.Logger
 	dbg      *debug.Logger
@@ -88,79 +87,100 @@ func NewClient(dbPath, mediaDir string, dbg *debug.Logger) (*Client, error) {
 	return c, nil
 }
 
-// SetSendMsg sets the callback used to send messages to the Bubble Tea program.
-// Must be called before Connect.
-func (c *Client) SetSendMsg(fn func(tea.Msg)) {
+// SetEventHandler sets the callback that receives domain events (connection
+// state, QR codes, incoming messages, receipts, history sync). It is called from
+// whatsmeow's event goroutines, so fn must be safe for concurrent use. Must be
+// called before Connect.
+func (c *Client) SetEventHandler(fn func(core.Event)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sendMsg = fn
+	c.onEvent = fn
 }
 
-func (c *Client) send(msg tea.Msg) {
+func (c *Client) send(evt core.Event) {
 	c.mu.Lock()
-	fn := c.sendMsg
+	fn := c.onEvent
 	c.mu.Unlock()
 	if fn != nil {
-		fn(msg)
+		fn(evt)
 	}
 }
 
-// Connect starts the WhatsApp connection. If not logged in, initiates QR flow.
-func (c *Client) Connect() tea.Cmd {
-	return func() tea.Msg {
-		if c.wm.Store.ID == nil {
-			// Not logged in — start QR code flow
-			qrChan, _ := c.wm.GetQRChannel(context.Background())
-			err := c.wm.Connect()
-			if err != nil {
-				return tea.Msg(fmt.Errorf("connect: %w", err))
-			}
+// ConnectError reports that the websocket connection could not be opened
+// before QR pairing started. It is distinct from a login failure: nothing was
+// rejected by WhatsApp, the transport simply never came up.
+type ConnectError struct{ Err error }
 
-			for evt := range qrChan {
-				switch evt.Event {
-				case "code":
-					c.send(core.QRCode{Code: evt.Code})
-				case "timeout":
-					if c.dbg != nil {
-						c.dbg.Warn("QR code session timed out")
-					}
-					c.send(core.QRTimeout{})
-				case "success":
-					// Login event will be handled by the event handler
-					return nil
-				case "error":
-					err := evt.Error
-					if err == nil {
-						err = fmt.Errorf("QR login failed")
-					}
-					if c.dbg != nil {
-						c.dbg.Error(err, "QR login error")
-					}
-					return core.LoginFailed{Err: err}
-				default:
-					err := fmt.Errorf("QR pairing failed: %s", evt.Event)
-					if evt.Error != nil {
-						err = fmt.Errorf("QR pairing failed: %s: %w", evt.Event, evt.Error)
-					}
-					if c.dbg != nil {
-						c.dbg.Error(err, "QR channel terminal event")
-					}
-					return core.LoginFailed{Err: err}
-				}
-			}
-			return nil
-		}
+func (e *ConnectError) Error() string { return "connect: " + e.Err.Error() }
+func (e *ConnectError) Unwrap() error { return e.Err }
 
-		// Already logged in
+// Connect starts the WhatsApp connection and blocks until it is established or
+// fails.
+//
+// If the device is not logged in yet, Connect runs the QR flow: each code is
+// emitted as core.QRCode (and expiry as core.QRTimeout) through the event
+// handler, and Connect returns nil once pairing succeeds (the rest of the login
+// arrives as events) or when the QR channel closes after a timeout. A failure to
+// open the socket before pairing is returned as *ConnectError; a pairing error
+// is returned as-is.
+//
+// ctx bounds the QR wait only. The socket itself outlives the call: its
+// lifetime is managed by whatsmeow (and Disconnect), not by ctx.
+//
+// Connecting while already connected is not an error.
+func (c *Client) Connect(ctx context.Context) error {
+	if c.wm.Store.ID != nil {
 		err := c.wm.Connect()
 		if errors.Is(err, whatsmeow.ErrAlreadyConnected) {
 			return nil
 		}
-		if err != nil {
-			return core.LoginFailed{Err: err}
-		}
-		return nil
+		return err
 	}
+
+	// Not logged in — start QR code flow.
+	qrChan, _ := c.wm.GetQRChannel(ctx)
+	if err := c.wm.Connect(); err != nil {
+		return &ConnectError{Err: err}
+	}
+	return c.waitQR(qrChan)
+}
+
+// waitQR relays QR channel items to the event handler until the channel
+// reaches a terminal state.
+func (c *Client) waitQR(qrChan <-chan whatsmeow.QRChannelItem) error {
+	for evt := range qrChan {
+		switch evt.Event {
+		case "code":
+			c.send(core.QRCode{Code: evt.Code})
+		case "timeout":
+			if c.dbg != nil {
+				c.dbg.Warn("QR code session timed out")
+			}
+			c.send(core.QRTimeout{})
+		case "success":
+			// The login itself is reported by the event handler.
+			return nil
+		case "error":
+			err := evt.Error
+			if err == nil {
+				err = fmt.Errorf("QR login failed")
+			}
+			if c.dbg != nil {
+				c.dbg.Error(err, "QR login error")
+			}
+			return err
+		default:
+			err := fmt.Errorf("QR pairing failed: %s", evt.Event)
+			if evt.Error != nil {
+				err = fmt.Errorf("QR pairing failed: %s: %w", evt.Event, evt.Error)
+			}
+			if c.dbg != nil {
+				c.dbg.Error(err, "QR channel terminal event")
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // Disconnect cleanly disconnects from WhatsApp.
@@ -177,106 +197,93 @@ func (c *Client) GenerateMessageID() string {
 	return string(c.wm.GenerateMessageID())
 }
 
-// SendTextMessage sends a text message to the given JID using the provided ID.
-func (c *Client) SendTextMessage(jid types.JID, id, text string) tea.Cmd {
-	return func() tea.Msg {
-		resp, err := c.wm.SendMessage(context.Background(), jid, &waE2E.Message{
-			Conversation: proto.String(text),
-		}, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
-		if err != nil {
-			return core.MessageSendFailed{
-				ChatJID:   jid,
-				MessageID: id,
-				Err:       err,
-			}
-		}
-		return core.MessageSent{
-			ChatJID:   jid,
-			MessageID: resp.ID,
-			Timestamp: resp.Timestamp,
-		}
+// SendText sends a text message to jid using the provided message ID.
+func (c *Client) SendText(ctx context.Context, jid types.JID, id, text string) (core.MessageSent, error) {
+	return c.sendMessage(ctx, jid, id, &waE2E.Message{
+		Conversation: proto.String(text),
+	})
+}
+
+func (c *Client) sendMessage(ctx context.Context, jid types.JID, id string, msg *waE2E.Message) (core.MessageSent, error) {
+	resp, err := c.wm.SendMessage(ctx, jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
+	if err != nil {
+		return core.MessageSent{}, err
 	}
+	return core.MessageSent{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}, nil
 }
 
 const maxUploadSize = 64 << 20 // 64 MB
 
-// SendFileMessage reads path from disk, uploads it to WhatsApp, and sends it as a document.
-func (c *Client) SendFileMessage(jid types.JID, id, path string) tea.Cmd {
-	return func() tea.Msg {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
-		}
-		if len(data) > maxUploadSize {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
-		}
+// ErrFileTooLarge is returned when a file exceeds maxUploadSize.
+var ErrFileTooLarge = errors.New("file too large (max 64 MB)")
 
-		mimeType := detectMIME(path, data)
-
-		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaDocument)
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
-		}
-
-		msg := &waE2E.Message{
-			DocumentMessage: &waE2E.DocumentMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uploaded.FileLength),
-				Mimetype:      proto.String(mimeType),
-				FileName:      proto.String(filepath.Base(path)),
-			},
-		}
-
-		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: err}
-		}
-		return core.MessageSent{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+// readUpload reads path for upload, enforcing the size limit.
+func readUpload(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
 	}
+	if len(data) > maxUploadSize {
+		return nil, ErrFileTooLarge
+	}
+	return data, nil
 }
 
-// SendAudioMessage reads path from disk, uploads it, and sends it as a PTT voice message.
-// The file should be OGG Opus for best compatibility with WhatsApp clients.
-func (c *Client) SendAudioMessage(jid types.JID, id, path string) tea.Cmd {
-	return func() tea.Msg {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("read file: %w", err)}
-		}
-		if len(data) > maxUploadSize {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("file too large (max 64 MB)")}
-		}
-
-		mimeType := detectMIME(path, data)
-
-		uploaded, err := c.wm.Upload(context.Background(), data, whatsmeow.MediaAudio)
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: fmt.Errorf("upload: %w", err)}
-		}
-
-		msg := &waE2E.Message{
-			AudioMessage: &waE2E.AudioMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uploaded.FileLength),
-				Mimetype:      proto.String(mimeType),
-				PTT:           proto.Bool(true),
-			},
-		}
-
-		resp, err := c.wm.SendMessage(context.Background(), jid, msg, whatsmeow.SendRequestExtra{ID: types.MessageID(id)})
-		if err != nil {
-			return core.MessageSendFailed{ChatJID: jid, MessageID: id, Err: err}
-		}
-		return core.MessageSent{ChatJID: jid, MessageID: resp.ID, Timestamp: resp.Timestamp}
+// SendFile reads path from disk, uploads it to WhatsApp, and sends it as a document.
+func (c *Client) SendFile(ctx context.Context, jid types.JID, id, path string) (core.MessageSent, error) {
+	data, err := readUpload(path)
+	if err != nil {
+		return core.MessageSent{}, err
 	}
+
+	mimeType := detectMIME(path, data)
+
+	uploaded, err := c.wm.Upload(ctx, data, whatsmeow.MediaDocument)
+	if err != nil {
+		return core.MessageSent{}, fmt.Errorf("upload: %w", err)
+	}
+
+	return c.sendMessage(ctx, jid, id, &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+			Mimetype:      proto.String(mimeType),
+			FileName:      proto.String(filepath.Base(path)),
+		},
+	})
+}
+
+// SendAudio reads path from disk, uploads it, and sends it as a PTT voice message.
+// The file should be OGG Opus for best compatibility with WhatsApp clients.
+func (c *Client) SendAudio(ctx context.Context, jid types.JID, id, path string) (core.MessageSent, error) {
+	data, err := readUpload(path)
+	if err != nil {
+		return core.MessageSent{}, err
+	}
+
+	mimeType := detectMIME(path, data)
+
+	uploaded, err := c.wm.Upload(ctx, data, whatsmeow.MediaAudio)
+	if err != nil {
+		return core.MessageSent{}, fmt.Errorf("upload: %w", err)
+	}
+
+	return c.sendMessage(ctx, jid, id, &waE2E.Message{
+		AudioMessage: &waE2E.AudioMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+			Mimetype:      proto.String(mimeType),
+			PTT:           proto.Bool(true),
+		},
+	})
 }
 
 // detectMIME returns the MIME type for path, using file extension first and
@@ -293,37 +300,34 @@ func detectMIME(path string, data []byte) string {
 }
 
 // MarkRead sends read receipts for the given message IDs.
-func (c *Client) MarkRead(chatJID types.JID, sender types.JID, messageIDs []string) {
+func (c *Client) MarkRead(ctx context.Context, chatJID, sender types.JID, messageIDs []string) error {
 	ids := make([]types.MessageID, 0, len(messageIDs))
 	for _, id := range messageIDs {
 		ids = append(ids, types.MessageID(id))
 	}
-	_ = c.wm.MarkRead(context.Background(), ids, time.Now(), chatJID.ToNonAD(), sender.ToNonAD())
+	return c.wm.MarkRead(ctx, ids, time.Now(), chatJID.ToNonAD(), sender.ToNonAD())
 }
 
 // SendPresence sets the user's presence (available/unavailable).
-func (c *Client) SendPresence(available bool) {
+func (c *Client) SendPresence(ctx context.Context, available bool) error {
 	if available {
-		_ = c.wm.SendPresence(context.Background(), types.PresenceAvailable)
-	} else {
-		_ = c.wm.SendPresence(context.Background(), types.PresenceUnavailable)
+		return c.wm.SendPresence(ctx, types.PresenceAvailable)
 	}
+	return c.wm.SendPresence(ctx, types.PresenceUnavailable)
 }
 
 // SendChatPresence sends typing/stopped indicator.
-func (c *Client) SendChatPresence(jid types.JID, composing bool) {
+func (c *Client) SendChatPresence(ctx context.Context, jid types.JID, composing bool) error {
 	if composing {
-		_ = c.wm.SendChatPresence(context.Background(), jid, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-	} else {
-		_ = c.wm.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
+		return c.wm.SendChatPresence(ctx, jid, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 	}
+	return c.wm.SendChatPresence(ctx, jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
 }
 
 // GetContactName returns the best available name for a JID from whatsmeow's
-// contact store. Contacts are keyed by phone-number JID, so LID (@lid) JIDs are
-// first mapped back to their phone number before lookup.
-func (c *Client) GetContactName(jid types.JID) string {
-	ctx := context.Background()
+// contact store, or "" when unknown. Contacts are keyed by phone-number JID, so
+// LID (@lid) JIDs are first mapped back to their phone number before lookup.
+func (c *Client) GetContactName(ctx context.Context, jid types.JID) string {
 	lookup := jid
 	if jid.Server == types.HiddenUserServer {
 		if pn, err := c.wm.Store.LIDs.GetPNForLID(ctx, jid); err == nil && pn.User != "" {
@@ -350,11 +354,10 @@ func bestContactName(full, push, business string) string {
 // GetAllContactNames returns a map of JID string -> best name for all contacts.
 // Each name is registered under both the phone-number JID and (when known) the
 // matching LID JID, since WhatsApp increasingly addresses chats by LID.
-func (c *Client) GetAllContactNames() map[string]string {
-	ctx := context.Background()
+func (c *Client) GetAllContactNames(ctx context.Context) (map[string]string, error) {
 	contacts, err := c.wm.Store.Contacts.GetAllContacts(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	names := make(map[string]string, len(contacts))
 	for jid, contact := range contacts {
@@ -369,14 +372,14 @@ func (c *Client) GetAllContactNames() map[string]string {
 			}
 		}
 	}
-	return names
+	return names, nil
 }
 
 // GetGroupNames returns a map of JID string -> group name for all joined groups.
-func (c *Client) GetGroupNames() map[string]string {
-	groups, err := c.wm.GetJoinedGroups(context.Background())
+func (c *Client) GetGroupNames(ctx context.Context) (map[string]string, error) {
+	groups, err := c.wm.GetJoinedGroups(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	names := make(map[string]string, len(groups))
 	for _, g := range groups {
@@ -384,7 +387,7 @@ func (c *Client) GetGroupNames() map[string]string {
 			names[g.JID.String()] = g.Name
 		}
 	}
-	return names
+	return names, nil
 }
 
 // JID returns the current user's JID (nil if not logged in).
@@ -397,96 +400,67 @@ func (c *Client) WMClient() *whatsmeow.Client {
 	return c.wm
 }
 
-// DownloadMedia downloads msg's media to the local cache and returns a cmd that
-// emits MediaDownloadedMsg or MediaDownloadFailedMsg when done.
-func (c *Client) DownloadMedia(msg core.Message) tea.Cmd {
-	return func() tea.Msg {
-		if msg.DirectPath == "" || len(msg.MediaKey) == 0 {
-			return core.MediaDownloadFailed{
-				ChatJID:   msg.ChatJID,
-				MessageID: msg.ID,
-				Err:       fmt.Errorf("no download metadata for message %s", msg.ID),
-			}
-		}
-
-		ext := extFromMime(msg.MimeType)
-		cachePath, err := mediaCachePath(c.mediaDir, msg.ID, ext)
-		if err != nil {
-			return core.MediaDownloadFailed{
-				ChatJID:   msg.ChatJID,
-				MessageID: msg.ID,
-				Err:       fmt.Errorf("unsafe message ID: %w", err),
-			}
-		}
-
-		// Already cached — return immediately without a network call.
-		if _, err := os.Stat(cachePath); err == nil {
-			return core.MediaDownloaded{
-				ChatJID:   msg.ChatJID,
-				MessageID: msg.ID,
-				Path:      cachePath,
-			}
-		}
-
-		data, err := c.wm.DownloadMediaWithPath(
-			context.Background(),
-			msg.DirectPath,
-			msg.FileEncSHA256,
-			msg.FileSHA256,
-			msg.MediaKey,
-			waMediaType(msg.MediaType),
-			mmsType(msg.MediaType),
-			false,
-		)
-		if err != nil {
-			return core.MediaDownloadFailed{
-				ChatJID:   msg.ChatJID,
-				MessageID: msg.ID,
-				Err:       fmt.Errorf("download: %w", err),
-			}
-		}
-
-		// 0o600: media files are user-private (may contain personal content).
-		if err := os.WriteFile(cachePath, data, 0o600); err != nil {
-			return core.MediaDownloadFailed{
-				ChatJID:   msg.ChatJID,
-				MessageID: msg.ID,
-				Err:       fmt.Errorf("write cache: %w", err),
-			}
-		}
-
-		return core.MediaDownloaded{
-			ChatJID:   msg.ChatJID,
-			MessageID: msg.ID,
-			Path:      cachePath,
-		}
+// DownloadMedia downloads msg's media to the local cache (unless it is already
+// there) and returns the cached file path.
+func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, error) {
+	if msg.DirectPath == "" || len(msg.MediaKey) == 0 {
+		return "", fmt.Errorf("no download metadata for message %s", msg.ID)
 	}
+
+	ext := extFromMime(msg.MimeType)
+	cachePath, err := mediaCachePath(c.mediaDir, msg.ID, ext)
+	if err != nil {
+		return "", fmt.Errorf("unsafe message ID: %w", err)
+	}
+
+	// Already cached — return immediately without a network call.
+	if _, err := os.Stat(cachePath); err == nil {
+		return cachePath, nil
+	}
+
+	data, err := c.wm.DownloadMediaWithPath(
+		ctx,
+		msg.DirectPath,
+		msg.FileEncSHA256,
+		msg.FileSHA256,
+		msg.MediaKey,
+		waMediaType(msg.MediaType),
+		mmsType(msg.MediaType),
+		false,
+	)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+
+	// 0o600: media files are user-private (may contain personal content).
+	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+		return "", fmt.Errorf("write cache: %w", err)
+	}
+	return cachePath, nil
 }
 
-// OpenMedia opens path in an appropriate external application (non-blocking).
-// Audio/voice messages are sent to the first available player; everything else
-// goes to xdg-open.
-func (c *Client) OpenMedia(path, mediaType string) tea.Cmd {
-	return func() tea.Msg {
-		var cmd *exec.Cmd
-		switch mediaType {
-		case "audio", "voice":
-			for _, player := range []string{"mpv", "ffplay", "aplay"} {
-				if _, err := exec.LookPath(player); err == nil {
-					// "--" terminates option parsing so a path starting with "-"
-					// is never mistaken for a flag.
-					cmd = exec.Command(player, "--", path)
-					break
-				}
+// OpenMedia opens path in an appropriate external application without waiting
+// for it to exit. Audio/voice messages are sent to the first available player;
+// everything else goes to xdg-open. The returned error only reports a failure to
+// start the program.
+func (c *Client) OpenMedia(path, mediaType string) error {
+	return mediaOpenCommand(path, mediaType, exec.LookPath).Start()
+}
+
+// mediaOpenCommand builds the command OpenMedia runs. lookPath is injected so
+// player selection can be tested without the players installed.
+func mediaOpenCommand(path, mediaType string, lookPath func(string) (string, error)) *exec.Cmd {
+	switch mediaType {
+	case "audio", "voice":
+		for _, player := range []string{"mpv", "ffplay", "aplay"} {
+			if _, err := lookPath(player); err == nil {
+				// "--" terminates option parsing so a path starting with "-"
+				// is never mistaken for a flag.
+				return exec.Command(player, "--", path)
 			}
 		}
-		if cmd == nil {
-			cmd = exec.Command("xdg-open", "--", path)
-		}
-		// Detach from our process group so the player survives if we exit.
-		_ = cmd.Start()
-		return nil
 	}
+	return exec.Command("xdg-open", "--", path)
 }
 
 // waMediaType maps a theme media-type string to the whatsmeow MediaType constant.

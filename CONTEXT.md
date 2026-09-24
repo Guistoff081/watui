@@ -85,16 +85,16 @@ watui/
 
 ### Arquitetura Core: Bridge whatsmeow → Bubble Tea
 
-O desafio central é conectar o modelo event-driven do whatsmeow com o loop Model-View-Update do Bubble Tea.
-
-Solução: `p.Send()` como bridge.
+O desafio central é conectar o modelo event-driven do whatsmeow com o loop Model-View-Update do Bubble Tea. O pacote `internal/whatsapp` não importa Bubble Tea; a ponte tem duas metades:
 
 ```
-whatsmeow WebSocket → events.go handler → c.sendMsg(core.Event) → p.Send() → tea.Program loop → app.Update()
+eventos:  whatsmeow WebSocket → events.go handler → c.send(core.Event) → event handler → p.Send() → app.Update()
+comandos: app.Update() → WAClient (app/waadapter.go, tea.Cmd) → whatsapp.Client síncrono (ctx, resultado/erro) → evento core como tea.Msg
 ```
 
-- `whatsapp.Client` recebe `p.Send` como callback após criação do programa.
-- Cada evento whatsmeow é traduzido para um evento de domínio em `core/` (struct simples, recebida pelo app como `tea.Msg`).
+- **Eventos**: `whatsapp.Client.SetEventHandler(func(core.Event))` recebe, em `main.go`, `func(e core.Event) { p.Send(e) }`. Cada evento whatsmeow é traduzido para um evento de domínio em `core/` (struct simples, recebida pelo app como `tea.Msg`).
+- **Comandos**: os métodos do client são síncronos e recebem `context.Context` (`Connect(ctx) error`, `SendText/SendFile/SendAudio(ctx, …) (core.MessageSent, error)`, `DownloadMedia(ctx, msg) (path, error)`, `OpenMedia`, `MarkRead`, `SendChatPresence`, …). O adapter `app.NewWAClient` embrulha cada chamada em `tea.Cmd` e mapeia resultado/erro para eventos (`MessageSendFailed`, `MediaDownloaded`/`MediaDownloadFailed`, `LoginFailed`; `*whatsapp.ConnectError` vira `error` puro). O fluxo QR bloqueia dentro de `Connect` emitindo `core.QRCode`/`core.QRTimeout` pelo handler.
+- O history sync passa por `convertHistoryConversation` (pura, com um resolver para JID canônico/nomes), que desembrulha `EphemeralMessage`, `ViewOnceMessage*`, `DocumentWithCaptionMessage` etc. antes de extrair o conteúdo.
 - O `internal/core/` não importa nada do restante do projeto (evita import cycles).
 - O root `app.Model` roteia mensagens para os child models.
 
@@ -103,10 +103,10 @@ whatsmeow WebSocket → events.go handler → c.sendMsg(core.Event) → p.Send()
 1. Parse flags → Load config → Ensure data dirs
 2. Open app SQLite store + run migrations
 3. Open whatsmeow sqlstore container
-4. Create `whatsapp.Client` (sendMsg = nil temporariamente)
-5. Create `app.Model` → Create `tea.Program`
-6. Set `waClient.sendMsg = p.Send`
-7. `p.Run()` → `Init()` chama `waClient.Connect()` (QR flow ou reconexão)
+4. Create `whatsapp.Client` (sem event handler ainda)
+5. Create `app.Model` com `app.NewWAClient(waClient)` → Create `tea.Program`
+6. `waClient.SetEventHandler(func(e core.Event) { p.Send(e) })`
+7. `p.Run()` → `Init()` roda o cmd `Connect()` do adapter, que chama `waClient.Connect(ctx)` (QR flow ou reconexão)
 
 ---
 

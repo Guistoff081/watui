@@ -1,11 +1,14 @@
 package whatsapp
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -24,7 +27,7 @@ func (c *Client) handleEvent(rawEvt interface{}) {
 		if jid != nil {
 			c.send(core.Connected{JID: *jid})
 		}
-		c.SendPresence(true)
+		_ = c.SendPresence(context.Background(), true)
 
 	case *events.Disconnected:
 		c.send(core.Disconnected{})
@@ -82,47 +85,17 @@ func (c *Client) handleMessage(evt *events.Message) {
 		return
 	}
 
-	content := extractTextContent(evt.Message)
-	meta := extractMedia(evt.Message)
-
-	if meta.mediaType != "" {
-		// For media messages, Content holds the bare caption (may be "").
-		content = meta.caption
-	} else if content == "" {
-		content = "[media]"
-	}
-
-	senderName := ""
-	if evt.Info.PushName != "" {
-		senderName = evt.Info.PushName
-	}
-
 	chatJID := c.canonicalChatFromInfo(evt.Info)
 	senderJID := c.canonicalSenderFromInfo(evt.Info)
 
-	msg := core.Message{
-		ID:         evt.Info.ID,
-		ChatJID:    chatJID.String(),
-		SenderJID:  senderJID.String(),
-		SenderName: senderName,
-		Content:    content,
-		Timestamp:  evt.Info.Timestamp,
-		IsFromMe:   evt.Info.IsFromMe,
-		Status:     "received",
-
-		MediaType:     meta.mediaType,
-		MimeType:      meta.mimeType,
-		FileName:      meta.fileName,
-		Thumbnail:     meta.thumbnail,
-		Width:         meta.width,
-		Height:        meta.height,
-		Duration:      meta.duration,
-		IsAnimated:    meta.isAnimated,
-		DirectPath:    meta.directPath,
-		MediaKey:      meta.mediaKey,
-		FileSHA256:    meta.fileSHA256,
-		FileEncSHA256: meta.fileEncSHA256,
-	}
+	msg := newCoreMessage(evt.Message)
+	msg.ID = evt.Info.ID
+	msg.ChatJID = chatJID.String()
+	msg.SenderJID = senderJID.String()
+	msg.SenderName = evt.Info.PushName
+	msg.Timestamp = evt.Info.Timestamp
+	msg.IsFromMe = evt.Info.IsFromMe
+	msg.Status = "received"
 
 	if evt.Info.IsFromMe {
 		msg.Status = "sent"
@@ -162,133 +135,215 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 		return
 	}
 
+	ctx := context.Background()
 	// Resolve group subjects once per sync instead of one network call per chat.
-	groupNames := c.GetGroupNames()
+	groupNames, _ := c.GetGroupNames(ctx)
+	r := &clientHistoryResolver{c: c, ctx: ctx, groupNames: groupNames}
 
-	conversations := data.GetConversations()
-	for _, conv := range conversations {
-		jid := conv.GetID()
-		if jid == "" {
+	for _, conv := range data.GetConversations() {
+		convModel, messages, ok := convertHistoryConversation(conv, r)
+		if !ok {
 			continue
 		}
 
-		parsedJID, err := types.ParseJID(jid)
-		if err != nil {
-			continue
-		}
-
-		canonical := c.canonicalChatJID(parsedJID, types.EmptyJID)
-		canonicalStr := canonical.String()
-
-		isGroup := canonical.Server == types.GroupServer
-		name := conv.GetDisplayName()
-		if name == "" {
-			if isGroup {
-				name = groupNames[canonicalStr]
-			} else {
-				name = c.GetContactName(canonical)
-			}
-		}
-
-		convModel := core.Conversation{
-			JID:     canonicalStr,
-			Name:    name,
-			IsGroup: isGroup,
-		}
-
-		if conv.GetUnreadCount() > 0 {
-			convModel.UnreadCount = int(conv.GetUnreadCount())
-		}
-		if conv.GetPinned() > 0 {
-			convModel.IsPinned = true
-		}
-
-		// Process messages in this conversation
-		var messages []core.Message
-		var lastMsg string
-		var lastTime time.Time
-
-		for _, hm := range conv.GetMessages() {
-			wmi := hm.GetMessage()
-			if wmi == nil || wmi.Message == nil {
-				continue
-			}
-
-			msgInfo := wmi.GetKey()
-			if !isDisplayable(wmi.Message) {
-				c.logSkipped(msgInfo.GetID(), wmi.Message)
-				continue
-			}
-
-			meta := extractMedia(wmi.Message)
-
-			var content string
-			if meta.mediaType != "" {
-				content = meta.caption
-			} else {
-				content = extractTextContent(wmi.Message)
-				if content == "" {
-					content = "[media]"
-				}
-			}
-
-			ts := time.Unix(int64(wmi.GetMessageTimestamp()), 0)
-
-			msg := core.Message{
-				ID:        msgInfo.GetID(),
-				ChatJID:   canonicalStr,
-				SenderJID: msgInfo.GetParticipant(),
-				Content:   content,
-				Timestamp: ts,
-				IsFromMe:  msgInfo.GetFromMe(),
-				Status:    "received",
-
-				MediaType:     meta.mediaType,
-				MimeType:      meta.mimeType,
-				FileName:      meta.fileName,
-				Thumbnail:     meta.thumbnail,
-				Width:         meta.width,
-				Height:        meta.height,
-				Duration:      meta.duration,
-				IsAnimated:    meta.isAnimated,
-				DirectPath:    meta.directPath,
-				MediaKey:      meta.mediaKey,
-				FileSHA256:    meta.fileSHA256,
-				FileEncSHA256: meta.fileEncSHA256,
-			}
-
-			if msg.IsFromMe {
-				msg.Status = "read"
-				if msg.SenderJID == "" {
-					msg.SenderJID = canonicalStr
-				}
-			}
-
-			messages = append(messages, msg)
-
-			preview := msg.PreviewText()
-			if ts.After(lastTime) {
-				lastTime = ts
-				lastMsg = preview
-			}
-		}
-
-		convModel.LastMessage = lastMsg
-		convModel.LastMsgTime = lastTime
-
-		// ConversationUpdatedMsg must arrive before MessagesLoadedMsg so that
+		// ConversationUpdated must arrive before MessagesLoaded so that
 		// _foreign_keys=on does not silently drop history rows for new conversations.
 		c.send(core.ConversationUpdated{Conversation: convModel})
 
 		if len(messages) > 0 {
+			chatJID, _ := types.ParseJID(convModel.JID)
 			c.send(core.MessagesLoaded{
-				ChatJID:  canonical,
+				ChatJID:  chatJID,
 				Messages: messages,
 			})
 		}
 	}
 
 	c.send(core.HistorySyncComplete{})
+}
+
+// historyResolver supplies the lookups history conversion needs from the
+// WhatsApp session, so convertHistoryConversation can be tested with a fake.
+type historyResolver interface {
+	// canonicalChatJID maps a chat JID to its stable key (PN preferred over LID).
+	canonicalChatJID(chat types.JID) types.JID
+	// contactName returns the best known name for a user JID, or "".
+	contactName(jid types.JID) string
+	// groupName returns the subject of a joined group, or "".
+	groupName(jid types.JID) string
+	// skipped is told about each non-displayable message that was dropped.
+	skipped(id string, msg *waProto.Message)
+}
+
+type clientHistoryResolver struct {
+	c          *Client
+	ctx        context.Context
+	groupNames map[string]string
+}
+
+func (r *clientHistoryResolver) canonicalChatJID(chat types.JID) types.JID {
+	return r.c.canonicalChatJID(chat, types.EmptyJID)
+}
+
+func (r *clientHistoryResolver) contactName(jid types.JID) string {
+	return r.c.GetContactName(r.ctx, jid)
+}
+
+func (r *clientHistoryResolver) groupName(jid types.JID) string {
+	return r.groupNames[jid.String()]
+}
+
+func (r *clientHistoryResolver) skipped(id string, msg *waProto.Message) {
+	r.c.logSkipped(id, msg)
+}
+
+// convertHistoryConversation converts one history-sync conversation into the
+// conversation row and its displayable messages. ok is false when the
+// conversation has no usable JID and should be ignored.
+func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResolver) (_ core.Conversation, _ []core.Message, ok bool) {
+	parsedJID, err := types.ParseJID(conv.GetID())
+	if conv.GetID() == "" || err != nil {
+		return core.Conversation{}, nil, false
+	}
+
+	canonical := r.canonicalChatJID(parsedJID)
+	canonicalStr := canonical.String()
+
+	isGroup := canonical.Server == types.GroupServer
+	name := conv.GetDisplayName()
+	if name == "" {
+		if isGroup {
+			name = r.groupName(canonical)
+		} else {
+			name = r.contactName(canonical)
+		}
+	}
+
+	convModel := core.Conversation{
+		JID:         canonicalStr,
+		Name:        name,
+		IsGroup:     isGroup,
+		UnreadCount: int(conv.GetUnreadCount()),
+		IsPinned:    conv.GetPinned() > 0,
+	}
+
+	var messages []core.Message
+	for _, hm := range conv.GetMessages() {
+		wmi := hm.GetMessage()
+		if wmi == nil || wmi.Message == nil {
+			continue
+		}
+
+		key := wmi.GetKey()
+		content := unwrapMessage(wmi.Message)
+		if !isDisplayable(content) {
+			r.skipped(key.GetID(), content)
+			continue
+		}
+
+		msg := newCoreMessage(content)
+		msg.ID = key.GetID()
+		msg.ChatJID = canonicalStr
+		msg.SenderJID = historySender(wmi, canonical)
+		msg.Timestamp = time.Unix(int64(wmi.GetMessageTimestamp()), 0)
+		msg.IsFromMe = key.GetFromMe()
+		msg.Status = "received"
+		if msg.IsFromMe {
+			msg.Status = "read"
+		}
+
+		messages = append(messages, msg)
+
+		if msg.Timestamp.After(convModel.LastMsgTime) {
+			convModel.LastMsgTime = msg.Timestamp
+			convModel.LastMessage = msg.PreviewText()
+		}
+	}
+
+	return convModel, messages, true
+}
+
+// historySender returns the SenderJID for a history message in chat, keyed the
+// same way live messages are: 1:1 and newsletter messages are attributed to the
+// canonical chat (whatsmeow's ParseWebMessage uses the chat as sender there),
+// group and broadcast messages to the participant without its device suffix.
+// Own messages keep their participant when present and otherwise fall back to
+// the chat, as before.
+func historySender(wmi *waWeb.WebMessageInfo, chat types.JID) string {
+	participant := wmi.GetParticipant()
+	if participant == "" {
+		participant = wmi.GetKey().GetParticipant()
+	}
+	fromMe := wmi.GetKey().GetFromMe()
+
+	switch {
+	case fromMe && participant == "":
+		return chat.String()
+	case !fromMe && !(chat.Server == types.GroupServer || chat.Server == types.BroadcastServer):
+		return chat.String()
+	}
+	if jid, err := types.ParseJID(participant); err == nil {
+		return jid.ToNonAD().String()
+	}
+	return participant
+}
+
+// unwrapMessage strips the container messages WhatsApp wraps real content in
+// (disappearing-chat EphemeralMessage, view-once, DocumentWithCaption, bot
+// invoke, lottie sticker, device-sent echoes). Live messages arrive already
+// unwrapped by whatsmeow's events.Message.UnwrapRaw; history-sync messages do
+// not, so without this they would render as "[media]".
+//
+// It mirrors UnwrapRaw's order, with one deliberate difference: EditedMessage
+// stays wrapped, so edits keep being dropped as non-displayable instead of
+// appearing as a duplicate bubble.
+func unwrapMessage(msg *waProto.Message) *waProto.Message {
+	if m := msg.GetDeviceSentMessage().GetMessage(); m != nil {
+		msg = m
+	}
+	for _, wrapper := range []func(*waProto.Message) *waProto.FutureProofMessage{
+		(*waProto.Message).GetBotInvokeMessage,
+		(*waProto.Message).GetEphemeralMessage,
+		(*waProto.Message).GetViewOnceMessage,
+		(*waProto.Message).GetViewOnceMessageV2,
+		(*waProto.Message).GetViewOnceMessageV2Extension,
+		(*waProto.Message).GetLottieStickerMessage,
+		(*waProto.Message).GetDocumentWithCaptionMessage,
+	} {
+		if m := wrapper(msg).GetMessage(); m != nil {
+			msg = m
+		}
+	}
+	return msg
+}
+
+// newCoreMessage fills the content and media fields of a core.Message from a
+// displayable message. Media messages carry their bare caption (possibly "")
+// as Content; other kinds get a text rendering, or "[media]" when none exists.
+func newCoreMessage(m *waProto.Message) core.Message {
+	meta := extractMedia(m)
+	content := meta.caption
+	if meta.mediaType == "" {
+		content = extractTextContent(m)
+		if content == "" {
+			content = "[media]"
+		}
+	}
+	return core.Message{
+		Content:       content,
+		MediaType:     meta.mediaType,
+		MimeType:      meta.mimeType,
+		FileName:      meta.fileName,
+		Thumbnail:     meta.thumbnail,
+		Width:         meta.width,
+		Height:        meta.height,
+		Duration:      meta.duration,
+		IsAnimated:    meta.isAnimated,
+		DirectPath:    meta.directPath,
+		MediaKey:      meta.mediaKey,
+		FileSHA256:    meta.fileSHA256,
+		FileEncSHA256: meta.fileEncSHA256,
+	}
 }
 
 // nonDisplayableFields lists waE2E.Message fields (proto names) that carry no

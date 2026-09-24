@@ -71,12 +71,12 @@ func (c *Client) canonicalSenderFromInfo(info types.MessageInfo) types.JID {
 }
 
 // AltChatJID returns the alternate address (LID↔PN) for a 1:1 chat JID string.
-func (c *Client) AltChatJID(jidStr string) string {
+func (c *Client) AltChatJID(ctx context.Context, jidStr string) string {
 	jid, err := types.ParseJID(jidStr)
 	if err != nil {
 		return ""
 	}
-	alt, err := c.wm.Store.GetAltJID(context.Background(), jid.ToNonAD())
+	alt, err := c.wm.Store.GetAltJID(ctx, jid.ToNonAD())
 	if err != nil || alt.IsEmpty() {
 		return ""
 	}
