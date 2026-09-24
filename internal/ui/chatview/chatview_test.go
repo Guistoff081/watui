@@ -1,6 +1,10 @@
 package chatview
 
 import (
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -232,6 +236,33 @@ func TestRenderMessageWrapsLongLines(t *testing.T) {
 	for _, l := range strings.Split(out, "\n") {
 		if w := lipgloss.Width(l); w > 60 {
 			t.Errorf("line width %d exceeds view width 60: %q", w, l)
+		}
+	}
+}
+
+// Animated stickers and thumbnail-less GIFs render their extracted still
+// frame (core.PosterPath) instead of an empty preview.
+func TestRenderMessageUsesPosterForAnimatedMedia(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "a.webp")
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for i := range img.Pix {
+		img.Pix[i] = 200
+	}
+	f, err := os.Create(core.PosterPath(media))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = png.Encode(f, img)
+	f.Close()
+
+	for _, msg := range []core.Message{
+		{ID: "st", MediaType: "sticker", IsAnimated: true, MediaPath: media, Timestamp: time.Unix(0, 0)},
+		{ID: "gf", MediaType: "gif", MediaPath: media, Timestamp: time.Unix(0, 0)},
+	} {
+		out := renderMessage(msg, 80, false, false, map[string]string{})
+		if !strings.Contains(out, "▀") {
+			t.Errorf("%s: no half-block preview rendered from the poster:\n%s", msg.MediaType, stripANSI(out))
 		}
 	}
 }

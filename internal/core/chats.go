@@ -419,14 +419,20 @@ func receiptsFor(chat string, isGroup bool, msgs []Message, unread int) []Receip
 	return out
 }
 
-// stickersToAutoDownload returns up to limit stickers that still need their
-// file downloaded, newest first. msgs is time-ascending, so walking backwards
-// favours the stickers visible at the bottom of the chat.
+// stickersToAutoDownload returns up to limit media messages whose preview
+// needs the file, newest first (msgs is time-ascending, so walking backwards
+// favours what is visible at the bottom of the chat): stickers not yet
+// downloaded (they carry no thumbnail), and poster media (animated stickers,
+// thumbnail-less GIFs) even when cached, since the download also creates the
+// still frame if it is missing. Videos are never fetched automatically.
 func stickersToAutoDownload(msgs []Message, limit int) []Message {
 	var out []Message
 	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
 		msg := msgs[i]
-		if msg.MediaType == "sticker" && msg.MediaPath == "" && msg.DirectPath != "" {
+		if msg.DirectPath == "" {
+			continue
+		}
+		if (msg.NeedsPoster() && msg.MediaType != "video") || (msg.MediaType == "sticker" && msg.MediaPath == "") {
 			out = append(out, msg)
 		}
 	}

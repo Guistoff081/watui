@@ -918,3 +918,17 @@ func TestAddMessageFillsUnnamedChatFromPushName(t *testing.T) {
 		t.Errorf("name = %q, push name must not override a known name", got)
 	}
 }
+
+func TestAutoDownloadIncludesPosterMedia(t *testing.T) {
+	msgs := []Message{
+		{ID: "gif", MediaType: "gif", DirectPath: "/d"},                                                       // no thumbnail: needs a poster
+		{ID: "gif-thumb", MediaType: "gif", DirectPath: "/d", Thumbnail: []byte{1}},                           // has its own preview
+		{ID: "anim-cached", MediaType: "sticker", IsAnimated: true, DirectPath: "/d", MediaPath: "/c/a.webp"}, // poster may be missing
+		{ID: "static-cached", MediaType: "sticker", DirectPath: "/d", MediaPath: "/c/s.webp"},
+		{ID: "video", MediaType: "video", DirectPath: "/d"}, // never auto-download full videos
+	}
+	got := msgIDs(stickersToAutoDownload(msgs, 10))
+	if want := []string{"anim-cached", "gif"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("auto-download = %v, want %v", got, want)
+	}
+}

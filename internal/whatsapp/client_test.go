@@ -588,3 +588,98 @@ func TestHandleEventPushName(t *testing.T) {
 		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
+
+func TestExtFromMimePrefersCommonExtensions(t *testing.T) {
+	// The system MIME table lists .jfif/.f4v first for these; viewers and
+	// xdg-open handle the common extensions better.
+	for mimeType, want := range map[string]string{
+		"image/jpeg": ".jpg", "video/mp4": ".mp4", "image/webp": ".webp", "audio/ogg; codecs=opus": ".ogg",
+	} {
+		if got := extFromMime(mimeType); got != want {
+			t.Errorf("extFromMime(%q) = %q, want %q", mimeType, got, want)
+		}
+	}
+}
+
+func TestDownloadMediaCreatesPosterOnce(t *testing.T) {
+	c, _ := newStoreClient(t)
+	ctx := context.Background()
+	var calls []string
+	c.makePoster = func(_ context.Context, src, dst string) error {
+		calls = append(calls, src)
+		return os.WriteFile(dst, []byte("png"), 0o600)
+	}
+
+	anim := core.Message{ID: "ANIM", MediaType: "sticker", IsAnimated: true, MimeType: "image/webp",
+		DirectPath: "/v/x", MediaKey: []byte("k")}
+	cached, _ := mediaCachePath(c.mediaDir, "ANIM", ".webp")
+	if err := os.WriteFile(cached, []byte("webp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if got, err := c.DownloadMedia(ctx, anim); err != nil || got != cached {
+			t.Fatalf("DownloadMedia() = %q, %v", got, err)
+		}
+	}
+	if len(calls) != 1 || calls[0] != cached {
+		t.Errorf("makePoster calls = %v, want exactly one for %s", calls, cached)
+	}
+	if _, err := os.Stat(core.PosterPath(cached)); err != nil {
+		t.Errorf("poster not written: %v", err)
+	}
+
+	// Media with its own thumbnail never gets a poster.
+	static := core.Message{ID: "STATIC", MediaType: "sticker", MimeType: "image/webp", DirectPath: "/v/y", MediaKey: []byte("k")}
+	p, _ := mediaCachePath(c.mediaDir, "STATIC", ".webp")
+	_ = os.WriteFile(p, []byte("webp"), 0o600)
+	_, _ = c.DownloadMedia(ctx, static)
+	if len(calls) != 1 {
+		t.Errorf("makePoster called for a static sticker")
+	}
+
+	// A failing extractor doesn't fail the download.
+	c.makePoster = func(context.Context, string, string) error { return errors.New("no ffmpeg") }
+	gif := core.Message{ID: "GIF", MediaType: "gif", MimeType: "video/mp4", DirectPath: "/v/z", MediaKey: []byte("k")}
+	gp, _ := mediaCachePath(c.mediaDir, "GIF", ".mp4")
+	_ = os.WriteFile(gp, []byte("mp4"), 0o600)
+	if _, err := c.DownloadMedia(ctx, gif); err != nil {
+		t.Errorf("DownloadMedia with failing poster = %v, want nil", err)
+	}
+}
+
+func TestMediaOpenCommandLoopsAnimatedMedia(t *testing.T) {
+	dir := t.TempDir()
+	animated := filepath.Join(dir, "a.webp")
+	static := filepath.Join(dir, "s.webp")
+	// VP8X header: flags byte 20 has the animation bit (0x02) set / clear.
+	_ = os.WriteFile(animated, append([]byte("RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00"), 0x02, 0, 0, 0), 0o600)
+	_ = os.WriteFile(static, append([]byte("RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00"), 0x10, 0, 0, 0), 0o600)
+	hasMPV := func(n string) (string, error) {
+		if n == "mpv" {
+			return "/usr/bin/mpv", nil
+		}
+		return "", errors.New("not found")
+	}
+
+	tests := []struct {
+		path, mediaType string
+		lookPath        func(string) (string, error)
+		want            string
+	}{
+		{animated, "sticker", hasMPV, "mpv --loop=inf"},
+		{static, "sticker", hasMPV, "xdg-open"},
+		{filepath.Join(dir, "g.mp4"), "gif", hasMPV, "mpv --loop=inf"},
+		{animated, "sticker", func(string) (string, error) { return "", errors.New("none") }, "xdg-open"},
+	}
+	for _, tt := range tests {
+		cmd, err := mediaOpenCommand(tt.path, tt.mediaType, tt.lookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(append([]string{filepath.Base(cmd.Args[0])}, cmd.Args[1:len(cmd.Args)-1]...), " ")
+		if got != tt.want || cmd.Args[len(cmd.Args)-1] != tt.path {
+			t.Errorf("%s %s: args = %v, want %q + path", tt.mediaType, filepath.Base(tt.path), cmd.Args, tt.want)
+		}
+	}
+}

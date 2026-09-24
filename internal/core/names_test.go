@@ -33,3 +33,27 @@ func TestDisplayNameFormatsBrazilianNumbers(t *testing.T) {
 		}
 	}
 }
+
+func TestNeedsPoster(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{"animated sticker", Message{MediaType: "sticker", IsAnimated: true}, true},
+		{"static sticker", Message{MediaType: "sticker"}, false},
+		{"gif without thumbnail", Message{MediaType: "gif"}, true},
+		{"gif with thumbnail", Message{MediaType: "gif", Thumbnail: []byte{1}}, false},
+		{"video without thumbnail", Message{MediaType: "video"}, true},
+		{"image", Message{MediaType: "image"}, false},
+		{"text", Message{}, false},
+	}
+	for _, tt := range tests {
+		if got := tt.msg.NeedsPoster(); got != tt.want {
+			t.Errorf("%s: NeedsPoster() = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	if got := PosterPath("/cache/a.webp"); got != "/cache/a.webp.poster.png" {
+		t.Errorf("PosterPath() = %q", got)
+	}
+}

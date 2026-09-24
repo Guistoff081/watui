@@ -120,6 +120,10 @@ func renderImageBody(msg core.Message, maxW int, thumbCache map[string]string) s
 	var rendered string
 	if len(thumbData) > 0 {
 		rendered = cachedThumbnail(msg.ID, thumbData, msg.MimeType, thumbCols, thumbCache)
+	} else if msg.MediaPath != "" && msg.NeedsPoster() {
+		// Animated WebP and MP4 GIFs can't be decoded here; the download step
+		// extracted their first frame next to the file.
+		rendered = cachedThumbnailFromPath(msg.ID, core.PosterPath(msg.MediaPath), "image/png", thumbCols, thumbCache)
 	} else if msg.MediaPath != "" {
 		rendered = cachedThumbnailFromPath(msg.ID, msg.MediaPath, msg.MimeType, thumbCols, thumbCache)
 	}
