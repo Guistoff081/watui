@@ -406,6 +406,42 @@ func (c *Client) WMClient() *whatsmeow.Client {
 	return c.wm
 }
 
+// RequestOlderHistory asks the primary phone to send up to count messages
+// older than oldest in its chat (WhatsApp's on-demand history sync). The
+// answer arrives later as a HistorySync event and flows through the usual
+// ConversationUpdated/MessagesLoaded events; if the phone is offline nothing
+// arrives.
+func (c *Client) RequestOlderHistory(ctx context.Context, oldest core.Message, count int) error {
+	info, err := historyRequestInfo(oldest)
+	if err != nil {
+		return err
+	}
+	if _, err := c.wm.SendPeerMessage(ctx, c.wm.BuildHistorySyncRequest(info, count)); err != nil {
+		return fmt.Errorf("request history: %w", err)
+	}
+	return nil
+}
+
+// historyRequestInfo converts the oldest known message into the MessageInfo
+// an on-demand history request is anchored on.
+func historyRequestInfo(oldest core.Message) (*types.MessageInfo, error) {
+	if oldest.ID == "" {
+		return nil, errors.New("request history: oldest message has no ID")
+	}
+	chat, err := types.ParseJID(oldest.ChatJID)
+	if err != nil {
+		return nil, fmt.Errorf("request history: %w", err)
+	}
+	if chat.User == "" || chat.Server == "" {
+		return nil, fmt.Errorf("request history: invalid chat JID %q", oldest.ChatJID)
+	}
+	return &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, IsFromMe: oldest.IsFromMe},
+		ID:            types.MessageID(oldest.ID),
+		Timestamp:     oldest.Timestamp,
+	}, nil
+}
+
 // DownloadMedia downloads msg's media to the local cache (unless it is already
 // there) and returns the cached file path.
 func (c *Client) DownloadMedia(ctx context.Context, msg core.Message) (string, error) {

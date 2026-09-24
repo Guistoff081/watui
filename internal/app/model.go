@@ -52,6 +52,9 @@ type WAClient interface {
 	AltChatJID(jid string) string
 	DownloadMedia(msg core.Message) tea.Cmd
 	OpenMedia(path, mediaType string) tea.Cmd
+	// RequestOlderHistory asks the phone for messages older than oldest; they
+	// arrive later as core.MessagesLoaded.
+	RequestOlderHistory(oldest core.Message) tea.Cmd
 }
 
 // Store is the persistence the app needs. Every call runs inside a tea.Cmd,
@@ -96,6 +99,10 @@ type persistErrMsg struct{ Err error }
 // connectFailedMsg reports that the WhatsApp socket could not be opened. It is
 // the only error that switches the app to StateError.
 type connectFailedMsg struct{ Err error }
+
+// historyRequestFailedMsg reports that the phone could not be asked for
+// older messages (e.g. not connected).
+type historyRequestFailedMsg struct{ Err error }
 
 // mediaOpenFailedMsg reports that no external app could open a media file.
 type mediaOpenFailedMsg struct{ Err error }
@@ -148,6 +155,12 @@ type Model struct {
 	// arrives, OpenMedia is dispatched automatically.
 	pendingOpenMsgID string
 
+	// historyAsked records, per chat, which oldest message the phone was last
+	// asked to page back from and when (see olderFromPhone).
+	historyAsked map[string]historyAsk
+	// now is the clock; tests replace it.
+	now func() time.Time
+
 	log *debug.Logger
 }
 
@@ -167,6 +180,9 @@ func NewModel(wa WAClient, s Store, version string, log *debug.Logger) Model {
 		titleBar:  titlebar.New(),
 		statusBar: statusbar.New(version),
 		chats:     core.NewChats(wa),
+
+		historyAsked: make(map[string]historyAsk),
+		now:          time.Now,
 	}
 }
 

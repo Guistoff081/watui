@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/watui/watui/internal/core"
@@ -304,5 +305,52 @@ func TestInvalidateThumbnailPicksUpPosterCreatedLater(t *testing.T) {
 	m.SetChat("c@s.whatsapp.net", false, []core.Message{msg})
 	if !strings.Contains(m.View(), "▀") {
 		t.Errorf("poster not rendered after InvalidateThumbnail:\n%s", stripANSI(m.View()))
+	}
+}
+
+func tallMsg(id string, ts int64, lines int) core.Message {
+	return core.Message{ID: id, ChatJID: "c@s.whatsapp.net", Content: strings.TrimSpace(strings.Repeat("linha\n", lines)),
+		Timestamp: time.Unix(ts, 0)}
+}
+
+// Selecting the newest message must scroll it fully into view; the last
+// message's bottom used to be computed as its top line + 1, leaving a tall
+// message (e.g. a video thumbnail) cut at the bottom edge.
+func TestSelectNewestTallMessageScrollsToItsBottom(t *testing.T) {
+	m := New()
+	m.SetSize(60, 10)
+	m.SetFocused(true)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{tallMsg("a", 100, 3), tallMsg("b", 200, 3), tallMsg("tall", 300, 12)})
+
+	m.viewport.GotoTop()
+	for i := 0; i < 5; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if !m.viewport.AtBottom() {
+		t.Errorf("newest message selected but viewport not at bottom (YOffset %d of %d lines)",
+			m.viewport.YOffset, m.viewport.TotalLineCount())
+	}
+}
+
+// Loading older messages keeps the message that was on top at the same
+// screen row, instead of an estimate that ignored the removed loading line
+// and a date separator shared with the new page.
+func TestPrependKeepsPreviousTopMessageAnchored(t *testing.T) {
+	m := New()
+	m.SetSize(60, 10)
+	m.SetFocused(true)
+	day := int64(86400 * 20000)
+	m.SetChat("c@s.whatsapp.net", false, []core.Message{tallMsg("x", day+300, 2), tallMsg("y", day+400, 20)})
+	m.viewport.GotoTop()
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}) // first key selects the newest message
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	beforeRow := m.lineOffsets[0] - m.viewport.YOffset
+
+	m.PrependMessages([]core.Message{tallMsg("o1", day+100, 2), tallMsg("o2", day+200, 2)}) // same day as x
+	idx := 2                                                                                // x after the prepend
+	if got := m.lineOffsets[idx] - m.viewport.YOffset; got != beforeRow {
+		t.Errorf("previous top message moved from row %d to row %d after prepend", beforeRow, got)
 	}
 }

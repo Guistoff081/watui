@@ -47,6 +47,7 @@ type Model struct {
 
 	// lineOffsets[i] is the first line index of messages[i] in the viewport content.
 	lineOffsets []int
+	totalLines  int // rendered content height, set by rebuildContent
 
 	// Thumbnail ANSI block cache: key = msgID+":"+width → rendered ANSI string.
 	// Populated by renderMessage; invalidated on width change or MediaDownloadedMsg.
@@ -136,21 +137,17 @@ func (m *Model) PrependMessages(msgs []core.Message) {
 		return
 	}
 
+	// Anchor on the message that was on top: after the rebuild it must sit at
+	// the same screen row, whatever the new page, the removed loading line or
+	// a date separator it now shares add up to.
+	oldTop := 0
+	if len(m.lineOffsets) > 0 {
+		oldTop = m.lineOffsets[0]
+	}
+	savedOffset := m.viewport.YOffset
+
 	m.loading = false
 	m.oldestTS = msgs[0].Timestamp
-
-	// Count lines the new messages will add using the cache where possible.
-	var addedLines int
-	var lastDate string
-	for _, msg := range msgs {
-		dateStr := msg.Timestamp.Format("2006-01-02")
-		if dateStr != lastDate {
-			addedLines++
-			lastDate = dateStr
-		}
-		rendered := m.cachedRenderMessage(msg)
-		addedLines += strings.Count(rendered, "\n") + 1
-	}
 
 	// Shift the selection index to account for the prepended messages.
 	if m.selected >= 0 {
@@ -158,9 +155,10 @@ func (m *Model) PrependMessages(msgs []core.Message) {
 	}
 
 	m.messages = append(append([]core.Message(nil), msgs...), m.messages...)
-	savedOffset := m.viewport.YOffset
 	m.rebuildContent()
-	m.viewport.SetYOffset(savedOffset + addedLines)
+	if len(m.lineOffsets) > len(msgs) {
+		m.viewport.SetYOffset(savedOffset + m.lineOffsets[len(msgs)] - oldTop)
+	}
 }
 
 // SetNoMoreMessages signals that the store has no messages older than what is
@@ -169,6 +167,21 @@ func (m *Model) SetNoMoreMessages() {
 	m.loading = false
 	m.noMore = true
 }
+
+// StopLoading clears the "Loading older messages..." state without marking
+// the end of history (more may still arrive, e.g. from the phone).
+func (m *Model) StopLoading() {
+	if m.loading {
+		m.loading = false
+		m.rebuildContent()
+	}
+}
+
+// NoMoreMessages reports whether the view stopped requesting older pages.
+func (m Model) NoMoreMessages() bool { return m.noMore }
+
+// Messages returns the messages currently shown (read-only).
+func (m Model) Messages() []core.Message { return m.messages }
 
 func (m *Model) UpdateMessageStatus(msgID, status string) {
 	for i := range m.messages {
@@ -263,8 +276,8 @@ func (m Model) moveSelection(delta int) (Model, tea.Cmd) {
 	if m.selected < 0 {
 		// No selection yet — anchor at bottom.
 		m.selected = n - 1
+		m.rebuildContent() // selection changes rendering; scroll on fresh offsets
 		m.scrollToSelected()
-		m.rebuildContent()
 		return m, nil
 	}
 
@@ -285,8 +298,8 @@ func (m Model) moveSelection(delta int) (Model, tea.Cmd) {
 	}
 
 	m.selected = next
+	m.rebuildContent() // selection changes rendering; scroll on fresh offsets
 	m.scrollToSelected()
-	m.rebuildContent()
 	return m, cmd
 }
 
@@ -297,8 +310,9 @@ func (m *Model) scrollToSelected() {
 	}
 	top := m.lineOffsets[m.selected]
 
-	// Determine the bottom line of the selected message.
-	bottom := top + 1
+	// The selected message ends where the next one (or its date separator)
+	// starts, or at the end of the content for the newest message.
+	bottom := m.totalLines
 	if m.selected+1 < len(m.lineOffsets) {
 		bottom = m.lineOffsets[m.selected+1]
 	}
@@ -358,6 +372,7 @@ func (m *Model) rebuildContent() {
 		currentLine += strings.Count(rendered, "\n") + 1
 	}
 
+	m.totalLines = currentLine
 	m.viewport.SetContent(strings.Join(lines, "\n"))
 }
 

@@ -127,7 +127,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// messages, and must not discard them.
 		eff := m.chats.AddHistory(msg.ChatJID.String(), msg.Messages, m.chatView.ChatJID())
 		cmds = append(cmds, m.applyEffects(eff))
-		if eff.InView {
+		switch {
+		case eff.InView && len(eff.Prepend) > 0:
+			// An older page (on-demand from the phone): keep the reader's place.
+			m.chatView.PrependMessages(eff.Prepend)
+			m.statusBar.ClearMessage()
+		case eff.InView:
 			m.reloadChatView(eff.Chat)
 		}
 
@@ -143,12 +148,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case olderMessagesLoadedMsg:
 		if msg.Err != nil {
-			// Treated as the end of history, as before, but no longer silent.
+			// A read failure is reported and loading stops; it is not the end
+			// of history, so neither the phone is asked nor further loads
+			// disabled.
+			m.chatView.StopLoading()
 			cmds = append(cmds, m.reportStoreErr(msg.Err))
+			break
 		}
 		eff := m.chats.PrependOlder(msg.ChatJID, msg.Messages, m.chatView.ChatJID())
 		if eff.NoOlder {
-			m.chatView.SetNoMoreMessages()
+			cmds = append(cmds, m.olderFromPhone(eff.Chat))
 		} else if eff.InView {
 			m.chatView.PrependMessages(eff.Prepend)
 		}
@@ -191,6 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case core.MediaDownloadFailed:
 		cmds = append(cmds, m.handleMediaDownloadFailed(msg))
+
+	case historyRequestFailedMsg:
+		m.log.Error(msg.Err, "history request failed")
+		m.statusBar.SetMessage("Could not ask your phone for older messages: " + msg.Err.Error())
+		cmds = append(cmds, m.clearStatusAfter(statusTimeout))
 
 	case mediaOpenFailedMsg:
 		m.log.Error(msg.Err, "media open failed")
