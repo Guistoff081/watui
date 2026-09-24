@@ -57,13 +57,13 @@ type recordingWA struct {
 	disconnected bool
 	presence     []bool   // SendChatPresence composing values, in order
 	texts        []string // SendTextMessage bodies
-	historyReqs  []string // RequestOlderHistory anchor message IDs
+	historyReqs  []string // RequestOlderHistory anchors as "<msgID>@<chatJID>"
 }
 
 func (r *recordingWA) RequestOlderHistory(oldest core.Message) tea.Cmd {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.historyReqs = append(r.historyReqs, oldest.ID)
+	r.historyReqs = append(r.historyReqs, oldest.ID+"@"+oldest.ChatJID)
 	return func() tea.Msg { return nil }
 }
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.mau.fi/whatsmeow/types"
@@ -124,18 +125,42 @@ func (m *Model) setMessageStatus(chatJID, msgID, status string) tea.Cmd {
 	}})
 }
 
-// olderFromPhone runs when the local store has no older messages for jid: it
-// asks the phone for the page before the oldest cached message, once per
-// anchor. A repeat from the same anchor means the phone sent nothing older,
-// so the view stops asking.
+// historyAsk is an on-demand history request that may still be answered.
+type historyAsk struct {
+	anchor string // oldest cached message ID the request pages back from
+	at     time.Time
+}
+
+// historyRetryAfter is how long a request for the same anchor is considered
+// pending: the phone answers only while WhatsApp is running on it, which can
+// take minutes.
+const historyRetryAfter = time.Minute
+
+// olderFromPhone runs when the local store has no older messages for jid. It
+// asks the phone for the page before the oldest cached message, under every
+// alias of the chat (LID-migrated chats are keyed by LID on the phone; a
+// duplicate answer is deduplicated). While a request for the same anchor is
+// pending it only reports that it is waiting; after historyRetryAfter it
+// asks again. An unanswered request is not the end of history.
 func (m *Model) olderFromPhone(jid string) tea.Cmd {
 	msgs := m.chats.Messages(jid)
-	if len(msgs) == 0 || m.historyAsked[jid] == msgs[0].ID {
+	if len(msgs) == 0 {
 		m.chatView.SetNoMoreMessages()
 		return nil
 	}
-	m.historyAsked[jid] = msgs[0].ID
 	m.chatView.StopLoading()
+	oldest, now := msgs[0], m.now()
+	if ask, ok := m.historyAsked[jid]; ok && ask.anchor == oldest.ID && now.Sub(ask.at) < historyRetryAfter {
+		m.statusBar.SetMessage("Still waiting for your phone to send older messages…")
+		return m.clearStatusAfter(statusTimeout)
+	}
+	m.historyAsked[jid] = historyAsk{anchor: oldest.ID, at: now}
 	m.statusBar.SetMessage("Asking your phone for older messages…")
-	return tea.Batch(m.wa.RequestOlderHistory(msgs[0]), m.clearStatusAfter(statusTimeout))
+	cmds := []tea.Cmd{m.clearStatusAfter(statusTimeout)}
+	for _, alias := range m.chats.Aliases(jid) {
+		req := oldest
+		req.ChatJID = alias
+		cmds = append(cmds, m.wa.RequestOlderHistory(req))
+	}
+	return tea.Batch(cmds...)
 }

@@ -155,10 +155,11 @@ type Model struct {
 	// arrives, OpenMedia is dispatched automatically.
 	pendingOpenMsgID string
 
-	// historyAsked maps a chat to the oldest message ID the phone was last
-	// asked to page back from; asking again from the same anchor means the
-	// phone had nothing older.
-	historyAsked map[string]string
+	// historyAsked records, per chat, which oldest message the phone was last
+	// asked to page back from and when (see olderFromPhone).
+	historyAsked map[string]historyAsk
+	// now is the clock; tests replace it.
+	now func() time.Time
 
 	log *debug.Logger
 }
@@ -180,7 +181,8 @@ func NewModel(wa WAClient, s Store, version string, log *debug.Logger) Model {
 		statusBar: statusbar.New(version),
 		chats:     core.NewChats(wa),
 
-		historyAsked: make(map[string]string),
+		historyAsked: make(map[string]historyAsk),
+		now:          time.Now,
 	}
 }
 
