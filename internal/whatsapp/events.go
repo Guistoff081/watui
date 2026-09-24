@@ -114,6 +114,10 @@ func (c *Client) handleMessage(evt *events.Message) {
 	if vn := evt.Info.VerifiedName; vn != nil && vn.Details.GetVerifiedName() != "" {
 		msg.SenderName = vn.Details.GetVerifiedName() // businesses show their verified name
 	}
+	// In groups the member's address-book name wins, as in WhatsApp.
+	if evt.Info.IsGroup && !evt.Info.IsFromMe {
+		msg.SenderName = firstNonEmpty(c.GetContactName(context.Background(), senderJID), msg.SenderName)
+	}
 	msg.Timestamp = evt.Info.Timestamp
 	msg.IsFromMe = evt.Info.IsFromMe
 	msg.Status = "received"
@@ -281,6 +285,13 @@ func convertHistoryConversation(conv *waHistorySync.Conversation, r historyResol
 		} else {
 			// Businesses show their verified name, like WhatsApp does.
 			msg.SenderName = firstNonEmpty(wmi.GetVerifiedBizName(), wmi.GetPushName())
+			// In groups the address-book name of the member wins, as in
+			// WhatsApp; history messages often carry no push name at all.
+			if isGroup {
+				if sender, err := types.ParseJID(msg.SenderJID); err == nil {
+					msg.SenderName = firstNonEmpty(r.contactName(sender), msg.SenderName)
+				}
+			}
 		}
 		if msg.Content == unsupportedPlaceholder {
 			r.unsupported(msg.ID, content)

@@ -354,10 +354,13 @@ func TestHandleMessageSkipsNonDisplayable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// An offline store-backed client: group messages look the sender
+			// up in the address book.
+			c, rec := newStoreClient(t)
 			var sent []core.Event
-			c := &Client{onEvent: func(e core.Event) { sent = append(sent, e) }}
 
 			c.handleMessage(newEvt("ID1", tt.msg))
+			sent = rec.take()
 
 			if !tt.wantMsg {
 				if len(sent) != 0 {
